@@ -2,6 +2,7 @@ require("dotenv").config({ quiet: true });
 
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 const { chromium } = require("playwright-extra");
 const stealth = require("puppeteer-extra-plugin-stealth")();
 
@@ -25,6 +26,17 @@ const SELECTORS = {
     assistantMessage: '[data-message-author-role="assistant"]',
     attachButton: '[data-testid="composer-plus-btn"]',
 };
+
+const POPUP_DISMISS_PATTERNS = [
+    { text: /stay\s*logged\s*out/i, label: "Stay logged out" },
+    { text: /use\s+without\s+signing\s*in/i, label: "Use without signing in" },
+    { text: /use\s+chatgpt\s+without\s+an?\s+account/i, label: "Use ChatGPT without an account" },
+    { text: /^skip$/i, label: "Skip" },
+    { text: /^close$/i, label: "Close" },
+    { text: /^accept\s*all$/i, label: "Accept all cookies" },
+    { text: /^got\s*it$/i, label: "Got it" },
+    { text: /^dismiss$/i, label: "Dismiss" },
+];
 
 chromium.use(stealth);
 
@@ -73,16 +85,167 @@ function fileBlock(file) {
 
 const DECODE_NOTE = "\n\nThe file contents above are base64-encoded UTF-8. Decode each file before analyzing it.";
 
-async function waitForPromptInput(page) {
+const NO_AUTH_MODAL = '[data-testid="modal-no-auth-login"]';
+
+async function modalVisible(page) {
+    const modal = page.locator(NO_AUTH_MODAL).first();
+    if ((await modal.count()) === 0) return false;
+    return modal.isVisible().catch(() => false);
+}
+
+async function blockingDialogVisible(page) {
+    if (await modalVisible(page)) return true;
+    const dialog = page.locator('[role="dialog"]').first();
+    if ((await dialog.count()) === 0) return false;
+    return dialog.isVisible().catch(() => false);
+}
+
+async function clickDismissiveButton(page) {
+    for (const pattern of POPUP_DISMISS_PATTERNS) {
+        const candidates = page
+            .locator('button, [role="button"], a')
+            .filter({ hasText: pattern.text });
+        const total = await candidates.count();
+        for (let i = 0; i < total; i++) {
+            const candidate = candidates.nth(i);
+            if (!(await candidate.isVisible().catch(() => false))) continue;
+            console.log(`>> Clicking "${pattern.label}"...`);
+            try {
+                await candidate.click({ timeout: 5000 });
+            } catch {
+                await candidate.click({ timeout: 5000, force: true }).catch(() => {});
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+async function dismissBlockingUI(page) {
+    if (!(await blockingDialogVisible(page))) return;
+
+    const sawNoAuthModal = await modalVisible(page);
+    if (sawNoAuthModal) console.log(">> No-auth popup detected.");
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+        if (!(await blockingDialogVisible(page))) break;
+
+        const clicked = await clickDismissiveButton(page);
+        if (!clicked) break;
+
+        await page
+            .locator(NO_AUTH_MODAL)
+            .first()
+            .waitFor({ state: "hidden", timeout: 8000 })
+            .catch(() => {});
+        await page.waitForTimeout(500);
+    }
+
+    if (await blockingDialogVisible(page)) {
+        await page.keyboard.press("Escape");
+        await page.waitForTimeout(1000);
+    }
+
+    if (sawNoAuthModal && !(await modalVisible(page))) {
+        console.log(">> No-auth popup dismissed.");
+    }
+}
+
+async function isPromptReady(page) {
+    const input = page.locator(SELECTORS.promptInput).first();
+    if ((await input.count()) === 0) return false;
+    if (!(await input.isVisible().catch(() => false))) return false;
+
+    const enabled = await page
+        .evaluate(() => {
+            const el = document.querySelector("#prompt-textarea");
+            return !!el && !el.disabled && !el.readOnly && el.offsetParent !== null;
+        })
+        .catch(() => false);
+    if (!enabled) return false;
+
+    return !(await modalVisible(page));
+}
+
+async function waitForChatGPTReady(page) {
+    await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForTimeout(2000);
+
+    const deadline = Date.now() + 5 * 60 * 1000;
+    while (Date.now() < deadline) {
+        if (await modalVisible(page)) await dismissBlockingUI(page);
+        if (await isPromptReady(page)) break;
+        await page.waitForTimeout(1000);
+    }
+
+    if (!(await isPromptReady(page))) {
+        throw new Error("Prompt input never became usable. Run `node index.js --login` to log in manually.");
+    }
+
     const input = page.locator(SELECTORS.promptInput).first();
     try {
+        await input.click({ timeout: 10000, force: true });
+    } catch {
+        await dismissBlockingUI(page);
+        await page.waitForTimeout(1000);
+        await input.waitFor({ state: "visible", timeout: 15000 });
+        await waitForEnabled(page, input);
+        await input.click({ timeout: 10000, force: true });
+    }
+
+    await page.waitForTimeout(500);
+    console.log(">> Prompt input ready.");
+    return input;
+}
+
+async function waitForEnabled(page, input) {
+    await page.waitForFunction(
+        (sel) => {
+            const el = document.querySelector(sel);
+            return el && !el.disabled && !el.readOnly && el.offsetParent !== null;
+        },
+        SELECTORS.promptInput,
+        { timeout: 20000 }
+    );
+}
+
+async function waitForPromptInput(page) {
+    const input = page.locator(SELECTORS.promptInput).first();
+
+    try {
         await input.waitFor({ state: "visible", timeout: 20000 });
+        await waitForEnabled(page, input);
+
+        try {
+            await input.click({ timeout: 5000, force: true });
+        } catch {
+            await dismissBlockingUI(page);
+            await input.waitFor({ state: "visible", timeout: 15000 });
+            await waitForEnabled(page, input);
+            await input.click({ timeout: 10000 });
+        }
+
+        await page.waitForTimeout(500);
+        return input;
     } catch {
         console.log(">> No prompt box found. Log in to ChatGPT in the opened browser window...");
-        await input.waitFor({ state: "visible", timeout: 300000 });
-        console.log(">> Login detected, continuing.");
+        const startTime = Date.now();
+        const maxWait = 10 * 60 * 1000;
+
+        while (Date.now() - startTime < maxWait) {
+            await page.waitForTimeout(2000);
+            await dismissBlockingUI(page);
+            try {
+                await input.waitFor({ state: "visible", timeout: 5000 });
+                await waitForEnabled(page, input);
+                await input.click({ timeout: 5000, force: true });
+                await page.waitForTimeout(500);
+                return input;
+            } catch {}
+        }
+
+        throw new Error("Prompt input not found within timeout. Please log in manually.");
     }
-    return input;
 }
 
 async function waitForAttachmentChip(page, firstName) {
@@ -118,8 +281,10 @@ async function attachViaDrop(page, files) {
                 const dt = new DataTransfer();
                 dt.items.add(file);
                 const target = document.querySelector("#prompt-textarea");
-                for (const type of ["dragenter", "dragover", "drop"]) {
-                    target.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+                if (target) {
+                    for (const type of ["dragenter", "dragover", "drop"]) {
+                        target.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+                    }
                 }
             },
             { b64, name: file.name }
@@ -167,9 +332,35 @@ async function attachFiles(page, files) {
     }
 }
 
-async function sendQuestion(page, question) {
-    const input = await waitForPromptInput(page);
+async function typePrompt(page, input, question, attached) {
     await input.click();
+    await input.focus();
+    await input.fill("");
+
+    if (question.text) {
+        await input.type(question.text, { delay: 25 });
+    }
+
+    if (!attached) {
+        for (const file of question.files) {
+            await input.type(fileBlock(file), { delay: 0 });
+        }
+        if (question.files.length > 0) {
+            await input.type(DECODE_NOTE, { delay: 0 });
+        }
+    }
+
+    await page.waitForTimeout(800);
+}
+
+async function promptHasExpectedText(page, expectedHead) {
+    if (!expectedHead) return true;
+    const typed = await page.locator(SELECTORS.promptInput).first().innerText().catch(() => "");
+    return typed.includes(expectedHead);
+}
+
+async function sendQuestion(page, question) {
+    const input = await waitForChatGPTReady(page);
 
     let attached = false;
     if (question.files.length > 0) {
@@ -183,37 +374,34 @@ async function sendQuestion(page, question) {
         }
     }
 
-    if (question.text) {
-        await input.click();
-        await input.focus();
-        await page.evaluate(() => {
-            const el = document.querySelector("#prompt-textarea");
-            if (el) {
-                el.value = "";
-                el.dispatchEvent(new Event("input", { bubbles: true }));
-            }
-        });
-        await page.waitForTimeout(300);
-        await page.keyboard.type(question.text, { delay: 25 });
+    if (!(await isPromptReady(page))) {
+        await dismissBlockingUI(page);
+        await page.waitForTimeout(1000);
     }
 
-    if (!attached) {
-        for (const file of question.files) {
-            await page.keyboard.insertText(fileBlock(file));
-        }
-        if (question.files.length > 0) {
-            await page.keyboard.insertText(DECODE_NOTE);
-        }
+    const finalInput = page.locator(SELECTORS.promptInput).first();
+    const expectedHead = (question.text || (attached ? "" : DECODE_NOTE)).trim().slice(0, 60);
+
+    console.log(">> Writing prompt...");
+    await typePrompt(page, finalInput, question, attached);
+
+    if (!(await promptHasExpectedText(page, expectedHead))) {
+        console.log(">> Prompt text did not stick, retyping...");
+        await dismissBlockingUI(page);
+        await typePrompt(page, finalInput, question, attached);
     }
-    await page.waitForTimeout(800);
 
-    const promptInput = page.locator(SELECTORS.promptInput).first();
-    await promptInput.click();
-    await promptInput.focus();
+    await finalInput.click();
+    await finalInput.focus();
 
+    console.log(">> Sending prompt...");
     const sendButton = page.locator(SELECTORS.sendButton).first();
-    if (await sendButton.count() > 0) {
-        await sendButton.click();
+    if (await sendButton.count() > 0 && await sendButton.isVisible().catch(() => false)) {
+        try {
+            await sendButton.click();
+        } catch {
+            await page.keyboard.press("Enter");
+        }
     } else {
         await page.keyboard.press("Enter");
     }
@@ -223,8 +411,19 @@ async function sendQuestion(page, question) {
     const userCount = await userMessages.count();
     if (userCount === 0) {
         console.log(">> Send may have failed, retrying...");
+        await dismissBlockingUI(page);
+        await page.waitForTimeout(1000);
+        const retryInput = page.locator(SELECTORS.promptInput).first();
+        if (await retryInput.count() > 0) {
+            await retryInput.click();
+            await retryInput.focus();
+        }
         if (await sendButton.count() > 0) {
-            await sendButton.click({ force: true });
+            try {
+                await sendButton.click({ force: true });
+            } catch {
+                await page.keyboard.press("Enter");
+            }
         } else {
             await page.keyboard.press("Enter");
         }
@@ -263,9 +462,47 @@ async function waitForAnswer(page) {
     return replies.nth(finalCount - 1).innerText();
 }
 
+async function runLoginFlow(page) {
+    console.log(">> Starting login flow. Please log in with your account (up to 10 min)...");
+    await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForTimeout(2000);
+
+    const startTime = Date.now();
+    const maxWait = 10 * 60 * 1000;
+
+    while (Date.now() - startTime < maxWait) {
+        await page.waitForTimeout(2000);
+
+        if (!page.url().includes("/auth/login") && !page.url().includes("/auth/signin")) {
+            await dismissBlockingUI(page);
+
+            const input = page.locator(SELECTORS.promptInput).first();
+            if (await input.count() > 0) {
+                try {
+                    await input.waitFor({ state: "visible", timeout: 5000 });
+                    await waitForEnabled(page, input);
+                    await input.click({ timeout: 5000 });
+                    console.log(">> Login detected. Session saved in the browser profile for future runs.");
+                    return;
+                } catch {}
+            }
+        }
+
+        const currentUrl = page.url();
+        if (currentUrl.includes("/auth/login") || currentUrl.includes("/auth/signin")) {
+            const bodyText = await page.evaluate(() => document.body.innerText).catch(() => "");
+            if (/welcome back|sign.in|log.in/i.test(bodyText) && !bodyText.includes("#prompt-textarea")) {
+                continue;
+            }
+        }
+    }
+
+    throw new Error("Login timed out after 10 minutes. Please try again.");
+}
+
 function markProfileClean(profileDir) {
-    const prefsPath = path.join(profileDir, "Default", "Preferences");
     try {
+        const prefsPath = path.join(profileDir, "Default", "Preferences");
         const prefs = JSON.parse(fs.readFileSync(prefsPath, "utf8"));
         prefs.profile = prefs.profile || {};
         prefs.profile.exit_type = "Normal";
@@ -274,11 +511,33 @@ function markProfileClean(profileDir) {
     } catch {}
 }
 
+function clearSessionData(profileDir) {
+    try {
+        const localStoragePath = path.join(profileDir, "Default", "Local Storage", "leveldb");
+        if (fs.existsSync(localStoragePath)) {
+            const files = fs.readdirSync(localStoragePath).filter((f) => f.endsWith(".log") || f.endsWith(".ldb"));
+            for (const file of files) {
+                try {
+                    fs.unlinkSync(path.join(localStoragePath, file));
+                } catch {}
+            }
+        }
+    } catch {}
+}
+
+function wantsClearSession() {
+    return process.argv.slice(2).includes("--clear-session");
+}
+
 async function launchBrowser() {
     let lastError;
     for (const browser of BROWSERS) {
         if (browser.executablePath && !fs.existsSync(browser.executablePath)) continue;
         markProfileClean(browser.profileDir);
+        if (wantsClearSession()) {
+            console.log(`>> --clear-session: wiping saved local storage for ${browser.name}`);
+            clearSessionData(browser.profileDir);
+        }
         try {
             const context = await chromium.launchPersistentContext(browser.profileDir, {
                 channel: browser.channel,
@@ -300,14 +559,6 @@ async function launchBrowser() {
         }
     }
     throw new Error(`No browser could be launched (tried: ${BROWSERS.map((b) => b.name).join(", ")}). ${lastError?.message || ""}`);
-}
-
-async function runLoginFlow(page) {
-    await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
-    console.log(">> Log in with your premium account in the opened window (up to 10 min)...");
-    const input = page.locator(SELECTORS.promptInput).first();
-    await input.waitFor({ state: "visible", timeout: 600000 });
-    console.log(">> Login detected. Session saved in the browser profile for future runs.");
 }
 
 function loadQuestion() {
@@ -342,7 +593,6 @@ async function main() {
             await runLoginFlow(page);
             return;
         }
-        await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 60000 });
         await sendQuestion(page, question);
         const answer = await waitForAnswer(page);
         console.log("\n--- ANSWER ---\n");
