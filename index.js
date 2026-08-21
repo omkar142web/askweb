@@ -7,8 +7,11 @@ const stealth = require("puppeteer-extra-plugin-stealth")();
 
 const URL = "https://chatgpt.com/";
 const LOGIN_URL = "https://chatgpt.com/auth/login";
-const BROWSER_CHANNEL = "chrome";
-const PROFILE_DIRS = { chrome: "./user-data-chrome", chromium: "./user-data" };
+const BROWSERS = [
+    { name: "brave", executablePath: `${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`, profileDir: "./user-data-brave" },
+    { name: "chrome", channel: "chrome", profileDir: "./user-data-chrome" },
+    { name: "edge", channel: "msedge", profileDir: "./user-data-edge" },
+];
 const POLL_MS = 1000;
 const STABLE_POLLS_REQUIRED = 3;
 const MAX_FILE_CHARS = 150000;
@@ -259,27 +262,24 @@ async function waitForAnswer(page) {
 }
 
 async function launchBrowser() {
-    const attempts = [
-        { channel: BROWSER_CHANNEL, profileDir: PROFILE_DIRS[BROWSER_CHANNEL] },
-        { channel: undefined, profileDir: PROFILE_DIRS.chromium },
-    ];
-
     let lastError;
-    for (const attempt of attempts) {
+    for (const browser of BROWSERS) {
+        if (browser.executablePath && !fs.existsSync(browser.executablePath)) continue;
         try {
-            const context = await chromium.launchPersistentContext(attempt.profileDir, {
-                channel: attempt.channel,
+            const context = await chromium.launchPersistentContext(browser.profileDir, {
+                channel: browser.channel,
+                executablePath: browser.executablePath,
                 headless: false,
                 viewport: null,
                 args: ["--disable-blink-features=AutomationControlled"],
             });
-            console.log(`>> Browser: ${attempt.channel || "bundled chromium"} (profile: ${attempt.profileDir})`);
+            console.log(`>> Browser: ${browser.name} (profile: ${browser.profileDir})`);
             return context;
         } catch (error) {
             lastError = error;
         }
     }
-    throw lastError;
+    throw new Error(`No browser could be launched (tried: ${BROWSERS.map((b) => b.name).join(", ")}). ${lastError?.message || ""}`);
 }
 
 async function runLoginFlow(page) {
