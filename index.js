@@ -16,6 +16,7 @@ const POLL_MS = 1000;
 const STABLE_POLLS_REQUIRED = 3;
 const MAX_FILE_CHARS = 150000;
 const DEFAULT_QUESTION = "What is JavaScript?";
+const OUTPUT_FILE = "./output.md";
 
 const SELECTORS = {
     promptInput: "#prompt-textarea",
@@ -261,17 +262,35 @@ async function waitForAnswer(page) {
     return replies.nth(finalCount - 1).innerText();
 }
 
+function markProfileClean(profileDir) {
+    const prefsPath = path.join(profileDir, "Default", "Preferences");
+    try {
+        const prefs = JSON.parse(fs.readFileSync(prefsPath, "utf8"));
+        prefs.profile = prefs.profile || {};
+        prefs.profile.exit_type = "Normal";
+        prefs.profile.exited_cleanly = true;
+        fs.writeFileSync(prefsPath, JSON.stringify(prefs));
+    } catch {}
+}
+
 async function launchBrowser() {
     let lastError;
     for (const browser of BROWSERS) {
         if (browser.executablePath && !fs.existsSync(browser.executablePath)) continue;
+        markProfileClean(browser.profileDir);
         try {
             const context = await chromium.launchPersistentContext(browser.profileDir, {
                 channel: browser.channel,
                 executablePath: browser.executablePath,
                 headless: false,
                 viewport: null,
-                args: ["--disable-blink-features=AutomationControlled"],
+                args: [
+                    "--disable-blink-features=AutomationControlled",
+                    "--hide-crash-restore-bubble",
+                    "--disable-session-crashed-bubble",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                ],
             });
             console.log(`>> Browser: ${browser.name} (profile: ${browser.profileDir})`);
             return context;
@@ -301,7 +320,21 @@ async function main() {
     const question = loginOnly ? null : loadQuestion();
 
     const context = await launchBrowser();
+    let shuttingDown = false;
+    const shutdown = async () => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        console.log("\n>> Closing browser...");
+        await context.close().catch(() => {});
+        process.exit(0);
+    };
+    process.on("SIGINT", shutdown);
+    process.on("SIGTERM", shutdown);
+
     const page = context.pages()[0] || await context.newPage();
+    for (const extra of context.pages()) {
+        if (extra !== page) await extra.close().catch(() => {});
+    }
 
     try {
         if (loginOnly) {
@@ -313,6 +346,8 @@ async function main() {
         const answer = await waitForAnswer(page);
         console.log("\n--- ANSWER ---\n");
         console.log(answer.trim());
+        fs.writeFileSync(OUTPUT_FILE, answer.trim() + "\n", "utf8");
+        console.log(`\n>> Answer saved to ${OUTPUT_FILE}`);
     } finally {
         await context.close();
     }
