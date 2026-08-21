@@ -520,28 +520,26 @@ async function attachFiles(page, files) {
     }
 }
 
+function buildFullPrompt(question) {
+    const blocks = question.files.map(fileBlock).join("") + DECODE_NOTE;
+    return question.text ? `${question.text}\n${blocks}` : blocks;
+}
+
 async function typePrompt(page, input, question, attached) {
     await dismissBlockingUI(page);
 
     await input.click();
     await input.focus();
+    await input.fill("");
 
-    if (question.text) {
+    const pasteFiles = !attached && question.files.length > 0;
+    if (pasteFiles) {
+        await page.keyboard.insertText(buildFullPrompt(question));
+    } else if (question.text) {
         await input.fill(question.text);
-    } else {
-        await input.fill("");
     }
 
-    if (!attached) {
-        for (const file of question.files) {
-            await page.keyboard.insertText(fileBlock(file));
-        }
-        if (question.files.length > 0) {
-            await page.keyboard.insertText(DECODE_NOTE);
-        }
-    }
-
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(pasteFiles ? 1500 : 800);
 }
 
 async function promptHasExpectedText(page, expectedParts) {
@@ -587,12 +585,13 @@ async function sendQuestion(page, question) {
     if (!attached && question.files.length > 0) expectedParts.push("</file>");
 
     console.log(">> Writing prompt...");
-    await typePrompt(page, finalInput, question, attached);
-
-    if (!(await promptHasExpectedText(page, expectedParts))) {
-        console.log(">> Prompt text did not stick, retyping...");
-        await dismissBlockingUI(page);
+    for (let attempt = 1; attempt <= 3; attempt++) {
         await typePrompt(page, finalInput, question, attached);
+        if (await promptHasExpectedText(page, expectedParts)) break;
+
+        console.log(`>> Prompt text did not stick (attempt ${attempt}/3), retyping...`);
+        await dismissBlockingUI(page);
+        await page.waitForTimeout(500);
     }
 
     await finalInput.click();

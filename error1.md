@@ -1,30 +1,21 @@
-One major error is in attachViaDrop():
+One major error is in the Brave browser configuration:
 
 JavaScript
-const b64 = fs.readFileSync(file.fullPath).toString("base64");
-...
-const binary = atob(b64);
-const bytes = new Uint8Array(binary.length);
-...
-const file = new File([bytes], name, { type: mimeMap[ext] || "text/plain" });
+executablePath: `${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`
 
-Problem: ext is not normalized to lowercase before looking it up in mimeMap.
+This assumes process.env.LOCALAPPDATA exists and that the program is running on Windows. On macOS/Linux, LOCALAPPDATA is undefined, producing an invalid executable path such as:
 
-Earlier, extensions are normalized in shouldPasteFiles(), but here:
+undefined\BraveSoftware\Brave-Browser\Application\brave.exe
+
+That causes Brave to be skipped here:
 
 JavaScript
-const ext = name.split(".").pop() || "";
+if (browser.executablePath && !fs.existsSync(browser.executablePath)) continue;
 
-So a file such as TEST.JS gets ext === "JS" and falls through to:
+and can ultimately result in:
 
-JavaScript
-"text/plain"
+No browser could be launched
 
-That can cause the browser/ChatGPT upload pipeline to treat the attachment as plain text rather than JavaScript.
+Why this is major: if Brave is the only installed/configured browser, the entire program fails to start.
 
-Fix:
-
-JavaScript
-const ext = (name.split(".").pop() || "").toLowerCase();
-
-This is especially important because the code explicitly supports .js, .json, .py, .ts, etc., and the MIME mapping depends on the extension.
+A robust fix would detect the platform and use the appropriate Brave executable location, or avoid hard-coding the path and let Playwright locate the browser.
