@@ -18,6 +18,22 @@ const STABLE_POLLS_REQUIRED = 3;
 const MAX_FILE_CHARS = 150000;
 const DEFAULT_QUESTION = "What is JavaScript?";
 const DEFAULT_OUTPUT_FILE = "./output.md";
+const PASTE_FILE_EXTENSIONS = new Set([
+    ".css",
+    ".csv",
+    ".html",
+    ".js",
+    ".json",
+    ".jsx",
+    ".md",
+    ".py",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+]);
 
 const SELECTORS = {
     promptInput: "#prompt-textarea",
@@ -159,6 +175,10 @@ function loadFiles(fileRefs) {
 
         return { name: path.basename(fullPath), fullPath, content, truncated };
     });
+}
+
+function shouldPasteFiles(files) {
+    return files.some((file) => PASTE_FILE_EXTENSIONS.has(path.extname(file.name).toLowerCase()));
 }
 
 function fileBlock(file) {
@@ -472,29 +492,29 @@ async function attachViaFileInput(page, files) {
 async function attachFiles(page, files) {
     await dismissBlockingUI(page);
     try {
-        await attachViaDrop(page, files);
-        return "drop";
-    } catch (dropError) {
+        await attachViaFileInput(page, files);
+        return "file-input";
+    } catch (inputError) {
         if (await uploadOverlayVisible(page)) {
             await dismissBlockingUI(page);
             throw new Error(`upload overlay rejected "${files[0].name}"`);
         }
-        console.log(`>> Drop attach failed (${dropError.message.split("\n")[0]}), trying file input...`);
+        console.log(`>> File-input attach failed (${inputError.message.split("\n")[0]}), trying chooser...`);
         try {
-            await attachViaFileInput(page, files);
-            return "file-input";
-        } catch (inputError) {
+            await attachViaChooser(page, files);
+            return "chooser";
+        } catch (chooserError) {
             if (await uploadOverlayVisible(page)) {
                 await dismissBlockingUI(page);
                 throw new Error(`upload overlay rejected "${files[0].name}"`);
             }
-            console.log(`>> File-input attach failed (${inputError.message.split("\n")[0]}), trying chooser...`);
+            console.log(`>> Chooser attach failed (${chooserError.message.split("\n")[0]}), trying drag/drop...`);
             try {
-                await attachViaChooser(page, files);
-                return "chooser";
-            } catch (chooserError) {
+                await attachViaDrop(page, files);
+                return "drop";
+            } catch (dropError) {
                 await dismissBlockingUI(page);
-                throw new Error(`all attach strategies failed: ${chooserError.message.split("\n")[0]}`);
+                throw new Error(`all attach strategies failed: ${dropError.message.split("\n")[0]}`);
             }
         }
     }
@@ -526,24 +546,33 @@ async function typePrompt(page, input, question, attached) {
 
 async function promptHasExpectedText(page, expectedParts) {
     if (expectedParts.length === 0) return true;
-    const typed = await page.locator(SELECTORS.promptInput).first().innerText().catch(() => "");
+    const typed = await page
+        .locator(SELECTORS.promptInput)
+        .first()
+        .evaluate((el) => ("value" in el ? el.value : el.innerText || el.textContent || ""))
+        .catch(() => "");
     return expectedParts.every((part) => typed.includes(part));
 }
 
 async function sendQuestion(page, question) {
     const input = await waitForChatGPTReady(page);
+    const assistantCountBefore = await page.locator(SELECTORS.assistantMessage).count();
 
     let attached = false;
     if (question.files.length > 0) {
         console.log(`>> Loaded ${question.files.length} file(s): ${question.files.map((file) => file.name).join(", ")}`);
-        try {
-            await attachFiles(page, question.files);
-            attached = true;
-            console.log(`>> Attached ${question.files.length} file(s) via upload.`);
-            await page.waitForTimeout(3000);
-        } catch (error) {
-            console.log(`>> Upload failed (${error.message.split("\n")[0]}), falling back to paste.`);
-            await resetComposer(page);
+        if (shouldPasteFiles(question.files)) {
+            console.log(">> Text/code file detected, using paste mode.");
+        } else {
+            try {
+                await attachFiles(page, question.files);
+                attached = true;
+                console.log(`>> Attached ${question.files.length} file(s) via upload.`);
+                await page.waitForTimeout(3000);
+            } catch (error) {
+                console.log(`>> Upload failed (${error.message.split("\n")[0]}), falling back to paste.`);
+                await resetComposer(page);
+            }
         }
     }
 
@@ -605,15 +634,23 @@ async function sendQuestion(page, question) {
         }
         await page.waitForTimeout(2000);
     }
+
+    return assistantCountBefore;
 }
 
-async function waitForAnswer(page) {
+async function waitForAnswer(page, assistantCountBefore = 0) {
     const replies = page.locator(SELECTORS.assistantMessage);
-    await replies.first().waitFor({ state: "visible", timeout: 60000 });
+    await page.waitForFunction(
+        ({ selector, countBefore }) => document.querySelectorAll(selector).length > countBefore,
+        { selector: SELECTORS.assistantMessage, countBefore: assistantCountBefore },
+        { timeout: 60000 }
+    );
 
     let stableCount = 0;
-    let prevCount = -1;
     let prevLength = -1;
+    const answerIndex = assistantCountBefore;
+    const answer = replies.nth(answerIndex);
+    await answer.waitFor({ state: "visible", timeout: 60000 });
 
     while (stableCount < STABLE_POLLS_REQUIRED) {
         await page.waitForTimeout(POLL_MS);
@@ -623,19 +660,17 @@ async function waitForAnswer(page) {
         const stopVisible = await stopButton.isVisible().catch(() => false);
 
         let lastLength = 0;
-        if (count > 0) {
-            const text = await replies.nth(count - 1).innerText().catch(() => "");
+        if (count > assistantCountBefore) {
+            const text = await answer.innerText().catch(() => "");
             lastLength = text.trim().length;
         }
 
-        const unchanged = count === prevCount && lastLength === prevLength && lastLength > 0 && !stopVisible;
+        const unchanged = count > assistantCountBefore && lastLength === prevLength && lastLength > 0 && !stopVisible;
         stableCount = unchanged ? stableCount + 1 : 0;
-        prevCount = count;
         prevLength = lastLength;
     }
 
-    const finalCount = await replies.count();
-    return replies.nth(finalCount - 1).innerText();
+    return answer.innerText();
 }
 
 async function runLoginFlow(page) {
@@ -769,8 +804,8 @@ async function main() {
             await runLoginFlow(page);
             return;
         }
-        await sendQuestion(page, question);
-        const answer = await waitForAnswer(page);
+        const assistantCountBefore = await sendQuestion(page, question);
+        const answer = await waitForAnswer(page, assistantCountBefore);
         console.log("\n--- ANSWER ---\n");
         console.log(answer.trim());
         fs.writeFileSync(CLI.outputFile, answer.trim() + "\n", "utf8");
