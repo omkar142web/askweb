@@ -1,5 +1,7 @@
 require("dotenv").config();
 
+const fs = require("fs");
+const path = require("path");
 const { chromium } = require("playwright-extra");
 const stealth = require("puppeteer-extra-plugin-stealth")();
 
@@ -7,6 +9,8 @@ const URL = "https://chatgpt.com/";
 const PROFILE_DIR = "./user-data";
 const POLL_MS = 1000;
 const STABLE_POLLS_REQUIRED = 3;
+const MAX_FILE_CHARS = 150000;
+const DEFAULT_QUESTION = "What is JavaScript?";
 
 const SELECTORS = {
     promptInput: "#prompt-textarea",
@@ -17,9 +21,42 @@ const SELECTORS = {
 
 chromium.use(stealth);
 
-function getQuestion() {
-    const fromArgs = process.argv.slice(2).join(" ").trim();
-    return fromArgs || "What is JavaScript?";
+function parseQuestion() {
+    const raw = process.argv.slice(2).join(" ").trim();
+    if (!raw) return { text: DEFAULT_QUESTION, files: [] };
+
+    const textParts = [];
+    const fileRefs = [];
+
+    for (const token of raw.split(/\s+/)) {
+        if (token.startsWith("@") && token.length > 1) {
+            fileRefs.push(token.slice(1).replace(/^"+|"+$/g, ""));
+        } else {
+            textParts.push(token);
+        }
+    }
+
+    return { text: textParts.join(" "), files: fileRefs };
+}
+
+function loadFiles(fileRefs) {
+    return fileRefs.map((ref) => {
+        const fullPath = path.resolve(ref);
+        if (!fs.existsSync(fullPath)) {
+            throw new Error(`File not found: ${fullPath}`);
+        }
+
+        let content = fs.readFileSync(fullPath, "utf8");
+        const truncated = content.length > MAX_FILE_CHARS;
+        if (truncated) content = content.slice(0, MAX_FILE_CHARS);
+
+        return { name: path.basename(fullPath), content, truncated };
+    });
+}
+
+function fileBlock(file) {
+    const suffix = file.truncated ? "\n...[truncated]" : "";
+    return `\n\n<file name="${file.name}">\n${file.content}${suffix}\n</file>`;
 }
 
 async function waitForPromptInput(page) {
@@ -37,7 +74,13 @@ async function waitForPromptInput(page) {
 async function sendQuestion(page, question) {
     const input = await waitForPromptInput(page);
     await input.click();
-    await page.keyboard.type(question, { delay: 25 });
+
+    if (question.text) {
+        await page.keyboard.type(question.text, { delay: 25 });
+    }
+    for (const file of question.files) {
+        await page.keyboard.insertText(fileBlock(file));
+    }
     await page.waitForTimeout(300);
 
     const sendButton = page.locator(SELECTORS.sendButton).first();
@@ -79,7 +122,8 @@ async function waitForAnswer(page) {
 }
 
 async function main() {
-    const question = getQuestion();
+    const question = parseQuestion();
+    question.files = loadFiles(question.files);
 
     const context = await chromium.launchPersistentContext(PROFILE_DIR, {
         headless: false,
