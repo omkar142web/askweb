@@ -6,7 +6,9 @@ const { chromium } = require("playwright-extra");
 const stealth = require("puppeteer-extra-plugin-stealth")();
 
 const URL = "https://chatgpt.com/";
-const PROFILE_DIR = "./user-data";
+const LOGIN_URL = "https://chatgpt.com/auth/login";
+const BROWSER_CHANNEL = "chrome";
+const PROFILE_DIRS = { chrome: "./user-data-chrome", chromium: "./user-data" };
 const POLL_MS = 1000;
 const STABLE_POLLS_REQUIRED = 3;
 const MAX_FILE_CHARS = 150000;
@@ -20,6 +22,10 @@ const SELECTORS = {
 };
 
 chromium.use(stealth);
+
+function wantsLogin() {
+    return process.argv.slice(2).includes("--login");
+}
 
 function parseQuestion() {
     const raw = process.argv.slice(2).join(" ").trim();
@@ -127,19 +133,56 @@ async function waitForAnswer(page) {
     return replies.nth(finalCount - 1).innerText();
 }
 
-async function main() {
+async function launchBrowser() {
+    const attempts = [
+        { channel: BROWSER_CHANNEL, profileDir: PROFILE_DIRS[BROWSER_CHANNEL] },
+        { channel: undefined, profileDir: PROFILE_DIRS.chromium },
+    ];
+
+    let lastError;
+    for (const attempt of attempts) {
+        try {
+            const context = await chromium.launchPersistentContext(attempt.profileDir, {
+                channel: attempt.channel,
+                headless: false,
+                viewport: null,
+                args: ["--disable-blink-features=AutomationControlled"],
+            });
+            console.log(`>> Browser: ${attempt.channel || "bundled chromium"} (profile: ${attempt.profileDir})`);
+            return context;
+        } catch (error) {
+            lastError = error;
+        }
+    }
+    throw lastError;
+}
+
+async function runLoginFlow(page) {
+    await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    console.log(">> Log in with your premium account in the opened window (up to 10 min)...");
+    const input = page.locator(SELECTORS.promptInput).first();
+    await input.waitFor({ state: "visible", timeout: 600000 });
+    console.log(">> Login detected. Session saved in the browser profile for future runs.");
+}
+
+function loadQuestion() {
     const question = parseQuestion();
     question.files = loadFiles(question.files);
+    return question;
+}
 
-    const context = await chromium.launchPersistentContext(PROFILE_DIR, {
-        headless: false,
-        viewport: null,
-        args: ["--disable-blink-features=AutomationControlled"],
-    });
+async function main() {
+    const loginOnly = wantsLogin();
+    const question = loginOnly ? null : loadQuestion();
 
+    const context = await launchBrowser();
     const page = context.pages()[0] || await context.newPage();
 
     try {
+        if (loginOnly) {
+            await runLoginFlow(page);
+            return;
+        }
         await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 60000 });
         await sendQuestion(page, question);
         const answer = await waitForAnswer(page);
