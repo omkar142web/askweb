@@ -19,6 +19,7 @@ const SELECTORS = {
     sendButton: '[data-testid="send-button"]',
     stopButton: '[data-testid="stop-button"]',
     assistantMessage: '[data-message-author-role="assistant"]',
+    attachButton: '[data-testid="composer-plus-btn"]',
 };
 
 chromium.use(stealth);
@@ -56,7 +57,7 @@ function loadFiles(fileRefs) {
         const truncated = content.length > MAX_FILE_CHARS;
         if (truncated) content = content.slice(0, MAX_FILE_CHARS);
 
-        return { name: path.basename(fullPath), content, truncated };
+        return { name: path.basename(fullPath), fullPath, content, truncated };
     });
 }
 
@@ -80,32 +81,156 @@ async function waitForPromptInput(page) {
     return input;
 }
 
+async function waitForAttachmentChip(page, firstName) {
+    try {
+        await page.waitForFunction(
+            (name) => {
+                const text = document.body.innerText;
+                if (text.includes(name)) return true;
+                const stem = name.replace(/\.[^.]+$/, "");
+                return stem.length > 3 && text.includes(stem);
+            },
+            firstName,
+            { timeout: 15000 }
+        );
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+async function attachViaDrop(page, files) {
+    await page.locator(SELECTORS.promptInput).first().click();
+    for (const file of files) {
+        const b64 = fs.readFileSync(file.fullPath).toString("base64");
+        await page.evaluate(
+            ({ b64, name }) => {
+                const binary = atob(b64);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                const ext = name.split(".").pop() || "";
+                const mimeMap = { js: "text/javascript", txt: "text/plain", md: "text/markdown", json: "application/json", py: "text/x-python", csv: "text/csv" };
+                const file = new File([bytes], name, { type: mimeMap[ext] || "text/plain" });
+                const dt = new DataTransfer();
+                dt.items.add(file);
+                const target = document.querySelector("#prompt-textarea");
+                for (const type of ["dragenter", "dragover", "drop"]) {
+                    target.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
+                }
+            },
+            { b64, name: file.name }
+        );
+        const attached = await waitForAttachmentChip(page, file.name);
+        if (!attached) throw new Error(`drop did not create attachment chip for "${file.name}"`);
+    }
+}
+
+async function attachViaChooser(page, files) {
+    const chooserPromise = page.waitForEvent("filechooser", { timeout: 6000 });
+    await page.locator(SELECTORS.attachButton).first().click();
+
+    let chooser;
+    try {
+        chooser = await chooserPromise;
+    } catch {
+        const menuItem = page
+            .locator('[role="menuitem"], [role="menu"] button, [role="dialog"] button')
+            .filter({ hasText: /file|upload|computer|photos/i })
+            .first();
+        await menuItem.click({ timeout: 4000 });
+        chooser = await page.waitForEvent("filechooser", { timeout: 6000 });
+    }
+
+    await chooser.setFiles(files.map((file) => file.fullPath));
+
+    if (!(await waitForAttachmentChip(page, files[0].name))) {
+        throw new Error(`attachment chip for "${files[0].name}" never appeared`);
+    }
+}
+
+async function attachFiles(page, files) {
+    try {
+        await attachViaDrop(page, files);
+        return "drop";
+    } catch (dropError) {
+        console.log(`>> Drop attach failed (${dropError.message.split("\n")[0]}), trying chooser...`);
+        try {
+            await attachViaChooser(page, files);
+            return "chooser";
+        } catch (chooserError) {
+            throw new Error(`all attach strategies failed: ${chooserError.message.split("\n")[0]}`);
+        }
+    }
+}
+
 async function sendQuestion(page, question) {
     const input = await waitForPromptInput(page);
     await input.click();
 
+    let attached = false;
+    if (question.files.length > 0) {
+        try {
+            await attachFiles(page, question.files);
+            attached = true;
+            console.log(`>> Attached ${question.files.length} file(s) via upload.`);
+            await page.waitForTimeout(3000);
+        } catch (error) {
+            console.log(`>> Upload failed (${error.message.split("\n")[0]}), falling back to paste.`);
+        }
+    }
+
     if (question.text) {
+        await input.click();
+        await input.focus();
+        await page.evaluate(() => {
+            const el = document.querySelector("#prompt-textarea");
+            if (el) {
+                el.value = "";
+                el.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+        });
+        await page.waitForTimeout(300);
         await page.keyboard.type(question.text, { delay: 25 });
     }
-    for (const file of question.files) {
-        await page.keyboard.insertText(fileBlock(file));
+
+    if (!attached) {
+        for (const file of question.files) {
+            await page.keyboard.insertText(fileBlock(file));
+        }
+        if (question.files.length > 0) {
+            await page.keyboard.insertText(DECODE_NOTE);
+        }
     }
-    if (question.files.length > 0) {
-        await page.keyboard.insertText(DECODE_NOTE);
-    }
-    await page.waitForTimeout(300);
+    await page.waitForTimeout(800);
+
+    const promptInput = page.locator(SELECTORS.promptInput).first();
+    await promptInput.click();
+    await promptInput.focus();
 
     const sendButton = page.locator(SELECTORS.sendButton).first();
-    if (await sendButton.count() > 0 && await sendButton.isEnabled()) {
+    if (await sendButton.count() > 0) {
         await sendButton.click();
     } else {
         await page.keyboard.press("Enter");
+    }
+    await page.waitForTimeout(1500);
+
+    const userMessages = page.locator('[data-message-author-role="user"]');
+    const userCount = await userMessages.count();
+    if (userCount === 0) {
+        console.log(">> Send may have failed, retrying...");
+        if (await sendButton.count() > 0) {
+            await sendButton.click({ force: true });
+        } else {
+            await page.keyboard.press("Enter");
+        }
+        await page.waitForTimeout(2000);
     }
 }
 
 async function waitForAnswer(page) {
     const replies = page.locator(SELECTORS.assistantMessage);
-    await replies.first().waitFor({ state: "attached", timeout: 60000 });
+    await replies.first().waitFor({ state: "visible", timeout: 60000 });
 
     let stableCount = 0;
     let prevCount = -1;
