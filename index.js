@@ -1,4 +1,4 @@
-require("dotenv").config();
+require("dotenv").config({ quiet: true });
 
 const fs = require("fs");
 const path = require("path");
@@ -55,9 +55,12 @@ function loadFiles(fileRefs) {
 }
 
 function fileBlock(file) {
-    const suffix = file.truncated ? "\n...[truncated]" : "";
-    return `\n\n<file name="${file.name}">\n${file.content}${suffix}\n</file>`;
+    const encoded = Buffer.from(file.content, "utf8").toString("base64");
+    const truncationNote = file.truncated ? `\n(${file.name} was truncated to ${MAX_FILE_CHARS} chars)` : "";
+    return `\n\n<file name="${file.name}" encoding="base64">\n${encoded}\n</file>${truncationNote}`;
 }
+
+const DECODE_NOTE = "\n\nThe file contents above are base64-encoded UTF-8. Decode each file before analyzing it.";
 
 async function waitForPromptInput(page) {
     const input = page.locator(SELECTORS.promptInput).first();
@@ -80,6 +83,9 @@ async function sendQuestion(page, question) {
     }
     for (const file of question.files) {
         await page.keyboard.insertText(fileBlock(file));
+    }
+    if (question.files.length > 0) {
+        await page.keyboard.insertText(DECODE_NOTE);
     }
     await page.waitForTimeout(300);
 
@@ -117,8 +123,8 @@ async function waitForAnswer(page) {
         prevLength = lastLength;
     }
 
-    const count = await replies.count();
-    return replies.nth(count - 1).innerText();
+    const finalCount = await replies.count();
+    return replies.nth(finalCount - 1).innerText();
 }
 
 async function main() {
