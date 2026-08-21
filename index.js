@@ -29,10 +29,16 @@ const SELECTORS = {
 
 const POPUP_DISMISS_PATTERNS = [
     { text: /stay\s*logged\s*out/i, label: "Stay logged out" },
+    { text: /continue\s+logged\s*out/i, label: "Continue logged out" },
     { text: /use\s+without\s+signing\s*in/i, label: "Use without signing in" },
     { text: /use\s+chatgpt\s+without\s+an?\s+account/i, label: "Use ChatGPT without an account" },
+    { text: /continue\s+without\s+an?\s+account/i, label: "Continue without an account" },
+    { text: /continue\s+without\s+signing\s*in/i, label: "Continue without signing in" },
+    { text: /not\s+now/i, label: "Not now" },
+    { text: /maybe\s+later/i, label: "Maybe later" },
     { text: /^skip$/i, label: "Skip" },
     { text: /^close$/i, label: "Close" },
+    { text: /^no\s+thanks$/i, label: "No thanks" },
     { text: /^accept\s*all$/i, label: "Accept all cookies" },
     { text: /^got\s*it$/i, label: "Got it" },
     { text: /^dismiss$/i, label: "Dismiss" },
@@ -45,21 +51,27 @@ function wantsLogin() {
 }
 
 function parseQuestion() {
-    const raw = process.argv.slice(2).join(" ").trim();
+    const args = process.argv.slice(2).filter((arg) => !arg.startsWith("--"));
+    const raw = args.join(" ").trim();
     if (!raw) return { text: DEFAULT_QUESTION, files: [] };
 
     const textParts = [];
     const fileRefs = [];
 
-    for (const token of raw.split(/\s+/)) {
+    for (const rawToken of raw.split(/\s+/)) {
+        const token = stripShellQuotes(rawToken);
         if (token.startsWith("@") && token.length > 1) {
-            fileRefs.push(token.slice(1).replace(/^"+|"+$/g, ""));
+            fileRefs.push(stripShellQuotes(token.slice(1)));
         } else {
             textParts.push(token);
         }
     }
 
     return { text: textParts.join(" "), files: fileRefs };
+}
+
+function stripShellQuotes(value) {
+    return value.trim().replace(/^["']+|["']+$/g, "");
 }
 
 function loadFiles(fileRefs) {
@@ -86,6 +98,7 @@ function fileBlock(file) {
 const DECODE_NOTE = "\n\nThe file contents above are base64-encoded UTF-8. Decode each file before analyzing it.";
 
 const NO_AUTH_MODAL = '[data-testid="modal-no-auth-login"]';
+const UPLOAD_OVERLAY_TEXT = /add\s+anything/i;
 
 async function modalVisible(page) {
     const modal = page.locator(NO_AUTH_MODAL).first();
@@ -93,11 +106,21 @@ async function modalVisible(page) {
     return modal.isVisible().catch(() => false);
 }
 
+async function uploadOverlayVisible(page) {
+    const overlayText = page.getByText(UPLOAD_OVERLAY_TEXT).first();
+    if ((await overlayText.count()) === 0) return false;
+    return overlayText.isVisible().catch(() => false);
+}
+
 async function blockingDialogVisible(page) {
     if (await modalVisible(page)) return true;
-    const dialog = page.locator('[role="dialog"]').first();
-    if ((await dialog.count()) === 0) return false;
-    return dialog.isVisible().catch(() => false);
+    if (await uploadOverlayVisible(page)) return true;
+    const blockers = page.locator('[role="dialog"], [aria-modal="true"], [data-testid*="modal"], [class*="modal"], [class*="popover"]');
+    const count = await blockers.count();
+    for (let i = 0; i < count; i++) {
+        if (await blockers.nth(i).isVisible().catch(() => false)) return true;
+    }
+    return false;
 }
 
 async function clickDismissiveButton(page) {
@@ -122,16 +145,20 @@ async function clickDismissiveButton(page) {
 }
 
 async function dismissBlockingUI(page) {
-    if (!(await blockingDialogVisible(page))) return;
+    if (!(await blockingDialogVisible(page))) return false;
 
     const sawNoAuthModal = await modalVisible(page);
+    const sawUploadOverlay = await uploadOverlayVisible(page);
     if (sawNoAuthModal) console.log(">> No-auth popup detected.");
+    if (sawUploadOverlay) console.log(">> Upload overlay detected.");
+    let dismissed = false;
 
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
         if (!(await blockingDialogVisible(page))) break;
 
         const clicked = await clickDismissiveButton(page);
         if (!clicked) break;
+        dismissed = true;
 
         await page
             .locator(NO_AUTH_MODAL)
@@ -144,11 +171,27 @@ async function dismissBlockingUI(page) {
     if (await blockingDialogVisible(page)) {
         await page.keyboard.press("Escape");
         await page.waitForTimeout(1000);
+        dismissed = true;
     }
 
     if (sawNoAuthModal && !(await modalVisible(page))) {
         console.log(">> No-auth popup dismissed.");
     }
+    if (sawUploadOverlay && !(await uploadOverlayVisible(page))) {
+        console.log(">> Upload overlay dismissed.");
+    }
+
+    return dismissed;
+}
+
+async function resetComposer(page) {
+    await dismissBlockingUI(page);
+    if (!(await uploadOverlayVisible(page))) return;
+
+    console.log(">> Upload overlay still visible, reloading ChatGPT...");
+    await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForTimeout(2000);
+    await waitForChatGPTReady(page);
 }
 
 async function isPromptReady(page) {
@@ -173,13 +216,14 @@ async function waitForChatGPTReady(page) {
 
     const deadline = Date.now() + 5 * 60 * 1000;
     while (Date.now() < deadline) {
-        if (await modalVisible(page)) await dismissBlockingUI(page);
+        await dismissBlockingUI(page);
         if (await isPromptReady(page)) break;
         await page.waitForTimeout(1000);
     }
 
     if (!(await isPromptReady(page))) {
-        throw new Error("Prompt input never became usable. Run `node index.js --login` to log in manually.");
+        const pageText = await page.evaluate(() => document.body.innerText.slice(0, 500)).catch(() => "");
+        throw new Error(`Prompt input never became usable at ${page.url()}. Page text: ${pageText.replace(/\s+/g, " ").trim() || "(empty)"}. Run \`node index.js --login\` to log in manually.`);
     }
 
     const input = page.locator(SELECTORS.promptInput).first();
@@ -338,20 +382,30 @@ async function attachViaFileInput(page, files) {
 }
 
 async function attachFiles(page, files) {
+    await dismissBlockingUI(page);
     try {
         await attachViaDrop(page, files);
         return "drop";
     } catch (dropError) {
+        if (await uploadOverlayVisible(page)) {
+            await dismissBlockingUI(page);
+            throw new Error(`upload overlay rejected "${files[0].name}"`);
+        }
         console.log(`>> Drop attach failed (${dropError.message.split("\n")[0]}), trying file input...`);
         try {
             await attachViaFileInput(page, files);
             return "file-input";
         } catch (inputError) {
+            if (await uploadOverlayVisible(page)) {
+                await dismissBlockingUI(page);
+                throw new Error(`upload overlay rejected "${files[0].name}"`);
+            }
             console.log(`>> File-input attach failed (${inputError.message.split("\n")[0]}), trying chooser...`);
             try {
                 await attachViaChooser(page, files);
                 return "chooser";
             } catch (chooserError) {
+                await dismissBlockingUI(page);
                 throw new Error(`all attach strategies failed: ${chooserError.message.split("\n")[0]}`);
             }
         }
@@ -359,9 +413,7 @@ async function attachFiles(page, files) {
 }
 
 async function typePrompt(page, input, question, attached) {
-    if (await blockingDialogVisible(page)) {
-        await dismissBlockingUI(page);
-    }
+    await dismissBlockingUI(page);
 
     await input.click();
     await input.focus();
@@ -395,6 +447,7 @@ async function sendQuestion(page, question) {
 
     let attached = false;
     if (question.files.length > 0) {
+        console.log(`>> Loaded ${question.files.length} file(s): ${question.files.map((file) => file.name).join(", ")}`);
         try {
             await attachFiles(page, question.files);
             attached = true;
@@ -402,6 +455,7 @@ async function sendQuestion(page, question) {
             await page.waitForTimeout(3000);
         } catch (error) {
             console.log(`>> Upload failed (${error.message.split("\n")[0]}), falling back to paste.`);
+            await resetComposer(page);
         }
     }
 
@@ -426,6 +480,7 @@ async function sendQuestion(page, question) {
 
     await finalInput.click();
     await finalInput.focus();
+    await dismissBlockingUI(page);
 
     console.log(">> Sending prompt...");
     const sendButton = page.locator(SELECTORS.sendButton).first();
