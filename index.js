@@ -9,8 +9,8 @@ const stealth = require("puppeteer-extra-plugin-stealth")();
 const URL = "https://chatgpt.com/";
 const LOGIN_URL = "https://chatgpt.com/auth/login";
 const BROWSERS = [
-    { name: "brave", executablePath: `${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`, profileDir: "./user-data-brave" },
     { name: "chrome", channel: "chrome", profileDir: "./user-data-chrome" },
+    { name: "brave", executablePath: `${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`, profileDir: "./user-data-brave" },
     { name: "edge", channel: "msedge", profileDir: "./user-data-edge" },
 ];
 const POLL_MS = 1000;
@@ -104,26 +104,46 @@ function wantsLogin() {
 }
 
 function parseQuestion(args = CLI.questionArgs) {
-    const raw = args.join(" ").trim();
-    if (!raw) return { text: DEFAULT_QUESTION, files: [] };
-
     const textParts = [];
     const fileRefs = [];
 
-    for (const rawToken of raw.split(/\s+/)) {
-        const token = stripShellQuotes(rawToken);
-        if (token.startsWith("@") && token.length > 1) {
-            fileRefs.push(stripShellQuotes(token.slice(1)));
-        } else {
-            textParts.push(token);
+    for (const rawArg of args) {
+        const arg = stripShellQuotes(rawArg);
+        if (!arg) continue;
+
+        if (looksLikeExistingFile(arg)) {
+            fileRefs.push(arg);
+            continue;
+        }
+
+        for (const rawToken of arg.split(/\s+/)) {
+            const token = stripShellQuotes(rawToken);
+            if (!token) continue;
+
+            if (token.startsWith("@") && token.length > 1) {
+                fileRefs.push(stripShellQuotes(token.slice(1)));
+            } else if (looksLikeExistingFile(token)) {
+                fileRefs.push(token);
+            } else {
+                textParts.push(token);
+            }
         }
     }
 
-    return { text: textParts.join(" "), files: fileRefs };
+    const text = textParts.join(" ").trim();
+    return { text: text || DEFAULT_QUESTION, files: fileRefs };
 }
 
 function stripShellQuotes(value) {
     return value.trim().replace(/^["']+|["']+$/g, "");
+}
+
+function looksLikeExistingFile(value) {
+    try {
+        return fs.existsSync(path.resolve(value)) && fs.statSync(path.resolve(value)).isFile();
+    } catch {
+        return false;
+    }
 }
 
 function loadFiles(fileRefs) {
