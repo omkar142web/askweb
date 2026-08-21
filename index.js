@@ -317,46 +317,77 @@ async function attachViaChooser(page, files) {
     }
 }
 
+async function attachViaFileInput(page, files) {
+    const inputs = page.locator('input[type="file"]');
+    const count = await inputs.count();
+    if (count === 0) throw new Error("no input[type=file] in DOM");
+
+    let lastError;
+    for (let i = count - 1; i >= 0; i--) {
+        try {
+            await inputs.nth(i).setInputFiles(files.map((f) => f.fullPath), { timeout: 5000 });
+            if (!(await waitForAttachmentChip(page, files[0].name))) {
+                throw new Error(`attachment chip for "${files[0].name}" never appeared`);
+            }
+            return;
+        } catch (error) {
+            lastError = error;
+        }
+    }
+    throw lastError || new Error("input[type=file] attach failed");
+}
+
 async function attachFiles(page, files) {
     try {
         await attachViaDrop(page, files);
         return "drop";
     } catch (dropError) {
-        console.log(`>> Drop attach failed (${dropError.message.split("\n")[0]}), trying chooser...`);
+        console.log(`>> Drop attach failed (${dropError.message.split("\n")[0]}), trying file input...`);
         try {
-            await attachViaChooser(page, files);
-            return "chooser";
-        } catch (chooserError) {
-            throw new Error(`all attach strategies failed: ${chooserError.message.split("\n")[0]}`);
+            await attachViaFileInput(page, files);
+            return "file-input";
+        } catch (inputError) {
+            console.log(`>> File-input attach failed (${inputError.message.split("\n")[0]}), trying chooser...`);
+            try {
+                await attachViaChooser(page, files);
+                return "chooser";
+            } catch (chooserError) {
+                throw new Error(`all attach strategies failed: ${chooserError.message.split("\n")[0]}`);
+            }
         }
     }
 }
 
 async function typePrompt(page, input, question, attached) {
+    if (await blockingDialogVisible(page)) {
+        await dismissBlockingUI(page);
+    }
+
     await input.click();
     await input.focus();
-    await input.fill("");
 
     if (question.text) {
-        await input.type(question.text, { delay: 25 });
+        await input.fill(question.text);
+    } else {
+        await input.fill("");
     }
 
     if (!attached) {
         for (const file of question.files) {
-            await input.type(fileBlock(file), { delay: 0 });
+            await page.keyboard.insertText(fileBlock(file));
         }
         if (question.files.length > 0) {
-            await input.type(DECODE_NOTE, { delay: 0 });
+            await page.keyboard.insertText(DECODE_NOTE);
         }
     }
 
     await page.waitForTimeout(800);
 }
 
-async function promptHasExpectedText(page, expectedHead) {
-    if (!expectedHead) return true;
+async function promptHasExpectedText(page, expectedParts) {
+    if (expectedParts.length === 0) return true;
     const typed = await page.locator(SELECTORS.promptInput).first().innerText().catch(() => "");
-    return typed.includes(expectedHead);
+    return expectedParts.every((part) => typed.includes(part));
 }
 
 async function sendQuestion(page, question) {
@@ -380,12 +411,14 @@ async function sendQuestion(page, question) {
     }
 
     const finalInput = page.locator(SELECTORS.promptInput).first();
-    const expectedHead = (question.text || (attached ? "" : DECODE_NOTE)).trim().slice(0, 60);
+    const expectedParts = [];
+    if (question.text) expectedParts.push(question.text.trim().slice(0, 60));
+    if (!attached && question.files.length > 0) expectedParts.push("</file>");
 
     console.log(">> Writing prompt...");
     await typePrompt(page, finalInput, question, attached);
 
-    if (!(await promptHasExpectedText(page, expectedHead))) {
+    if (!(await promptHasExpectedText(page, expectedParts))) {
         console.log(">> Prompt text did not stick, retyping...");
         await dismissBlockingUI(page);
         await typePrompt(page, finalInput, question, attached);
