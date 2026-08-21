@@ -244,7 +244,8 @@ async function waitForAnswer(page) {
         await page.waitForTimeout(POLL_MS);
 
         const count = await replies.count();
-        const stopVisible = await page.locator(SELECTORS.stopButton).count() > 0;
+        const stopButton = page.locator(SELECTORS.stopButton).first();
+        const stopVisible = await stopButton.isVisible().catch(() => false);
 
         let lastLength = 0;
         if (count > 0) {
