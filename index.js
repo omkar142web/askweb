@@ -17,7 +17,7 @@ const POLL_MS = 1000;
 const STABLE_POLLS_REQUIRED = 3;
 const MAX_FILE_CHARS = 150000;
 const DEFAULT_QUESTION = "What is JavaScript?";
-const OUTPUT_FILE = "./output.md";
+const DEFAULT_OUTPUT_FILE = "./output.md";
 
 const SELECTORS = {
     promptInput: "#prompt-textarea",
@@ -46,12 +46,64 @@ const POPUP_DISMISS_PATTERNS = [
 
 chromium.use(stealth);
 
-function wantsLogin() {
-    return process.argv.slice(2).includes("--login");
+function parseCliArgs(argv = process.argv.slice(2)) {
+    const options = {
+        login: false,
+        clearSession: false,
+        outputFile: DEFAULT_OUTPUT_FILE,
+        questionArgs: [],
+    };
+
+    for (let i = 0; i < argv.length; i++) {
+        const arg = stripShellQuotes(argv[i]);
+
+        if (arg === "--") {
+            options.questionArgs.push(...argv.slice(i + 1).map(stripShellQuotes));
+            break;
+        }
+
+        if (arg === "--login") {
+            options.login = true;
+            continue;
+        }
+
+        if (arg === "--clear-session") {
+            options.clearSession = true;
+            continue;
+        }
+
+        if (arg === "--output" || arg === "-o") {
+            const value = argv[i + 1];
+            if (!value) throw new Error(`${arg} requires a file path`);
+            options.outputFile = stripShellQuotes(value);
+            i++;
+            continue;
+        }
+
+        if (arg.startsWith("--output=")) {
+            const value = arg.slice("--output=".length);
+            if (!value) throw new Error("--output requires a file path");
+            options.outputFile = stripShellQuotes(value);
+            continue;
+        }
+
+        if (arg.startsWith("-")) {
+            throw new Error(`Unknown option: ${arg}`);
+        }
+
+        options.questionArgs.push(arg);
+    }
+
+    return options;
 }
 
-function parseQuestion() {
-    const args = process.argv.slice(2).filter((arg) => !arg.startsWith("--"));
+const CLI = parseCliArgs();
+
+function wantsLogin() {
+    return CLI.login;
+}
+
+function parseQuestion(args = CLI.questionArgs) {
     const raw = args.join(" ").trim();
     if (!raw) return { text: DEFAULT_QUESTION, files: [] };
 
@@ -189,9 +241,25 @@ async function resetComposer(page) {
     if (!(await uploadOverlayVisible(page))) return;
 
     console.log(">> Upload overlay still visible, reloading ChatGPT...");
-    await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await gotoChatGPT(page);
     await page.waitForTimeout(2000);
     await waitForChatGPTReady(page);
+}
+
+async function gotoChatGPT(page) {
+    let lastError;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+            return;
+        } catch (error) {
+            lastError = error;
+            const message = error.message.split("\n")[0];
+            console.log(`>> ChatGPT navigation failed (${message}), retrying ${attempt}/3...`);
+            await page.waitForTimeout(3000);
+        }
+    }
+    throw lastError;
 }
 
 async function isPromptReady(page) {
@@ -211,7 +279,7 @@ async function isPromptReady(page) {
 }
 
 async function waitForChatGPTReady(page) {
-    await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await gotoChatGPT(page);
     await page.waitForTimeout(2000);
 
     const deadline = Date.now() + 5 * 60 * 1000;
@@ -614,7 +682,7 @@ function clearSessionData(profileDir) {
 }
 
 function wantsClearSession() {
-    return process.argv.slice(2).includes("--clear-session");
+    return CLI.clearSession;
 }
 
 async function launchBrowser() {
@@ -685,8 +753,8 @@ async function main() {
         const answer = await waitForAnswer(page);
         console.log("\n--- ANSWER ---\n");
         console.log(answer.trim());
-        fs.writeFileSync(OUTPUT_FILE, answer.trim() + "\n", "utf8");
-        console.log(`\n>> Answer saved to ${OUTPUT_FILE}`);
+        fs.writeFileSync(CLI.outputFile, answer.trim() + "\n", "utf8");
+        console.log(`\n>> Answer saved to ${CLI.outputFile}`);
     } finally {
         await context.close();
     }
