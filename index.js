@@ -117,6 +117,8 @@ Options:
       --browser-order     Configure browser fallback order
       --browser-reset     Reset browser preferences to automatic
       --clear-session     Clear saved local storage on launch
+      --clear-conversations Delete all saved conversation history
+      --clear-conversation <id> Delete one saved conversation by id (prefix ok)
   -h, --help              Show this help
   -v, --version           Show version
 
@@ -138,6 +140,8 @@ function parseCliArgs(argv = process.argv.slice(2)) {
     const options = {
         login: false,
         clearSession: false,
+        clearConversations: false,
+        clearConversationId: null,
         configureBrowser: false,
         configureBrowserOrder: false,
         resetBrowserPrefs: false,
@@ -164,6 +168,26 @@ function parseCliArgs(argv = process.argv.slice(2)) {
 
         if (arg === "--clear-session") {
             options.clearSession = true;
+            continue;
+        }
+
+        if (arg === "--clear-conversations") {
+            options.clearConversations = true;
+            continue;
+        }
+
+        if (arg === "--clear-conversation") {
+            const value = argv[i + 1];
+            if (!value) throw new Error(`${arg} requires a conversation id`);
+            options.clearConversationId = stripShellQuotes(value);
+            i++;
+            continue;
+        }
+
+        if (arg.startsWith("--clear-conversation=")) {
+            const value = arg.slice("--clear-conversation=".length);
+            if (!value) throw new Error("--clear-conversation requires a conversation id");
+            options.clearConversationId = stripShellQuotes(value);
             continue;
         }
 
@@ -1113,6 +1137,32 @@ function saveConversations(data) {
     fs.writeFileSync(CONVERSATIONS_FILE, JSON.stringify(data, null, 2), "utf8");
 }
 
+function clearAllConversations() {
+    try {
+        fs.unlinkSync(CONVERSATIONS_FILE);
+    } catch {}
+    console.log(`>> Cleared all saved conversation history (${CONVERSATIONS_FILE}).`);
+}
+
+function clearConversationById(idPrefix) {
+    const data = loadConversations();
+    const needle = idPrefix.toLowerCase();
+    const matches = data.conversations.filter((conversation) =>
+        String(conversation.id || "").toLowerCase().startsWith(needle)
+    );
+    if (matches.length === 0) {
+        console.log(`>> No saved conversation matches id "${idPrefix}".`);
+        return;
+    }
+    const matchedIds = new Set(matches.map((conversation) => conversation.id));
+    data.conversations = data.conversations.filter((conversation) => !matchedIds.has(conversation.id));
+    saveConversations(data);
+    console.log(`>> Removed ${matches.length} saved conversation(s):`);
+    for (const conversation of matches) {
+        console.log(`   - ${conversation.id}${conversation.title ? ` ("${conversation.title}")` : ""}`);
+    }
+}
+
 function latestConversation() {
     return (
         loadConversations().conversations.find(
@@ -1341,6 +1391,9 @@ async function main() {
     if (CLI.configureBrowser) return configureDefaultBrowser();
     if (CLI.configureBrowserOrder) return configureBrowserOrder();
     if (CLI.resetBrowserPrefs) return resetBrowserPreferences();
+
+    if (CLI.clearConversations) return clearAllConversations();
+    if (CLI.clearConversationId) return clearConversationById(CLI.clearConversationId);
 
     let targetUrl = URL;
     let continuing = null;
