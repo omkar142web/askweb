@@ -6,3 +6,4 @@ user-data-edge/
 .env
 .browser-prefs.json
 .chatgpt-conversations.json
+output.md
