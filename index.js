@@ -42,11 +42,27 @@ const SELECTORS = {
     sendButton: '[data-testid="send-button"]',
     stopButton: '[data-testid="stop-button"]',
     assistantMessage: '[data-message-author-role="assistant"]',
+    userMessage: '[data-message-author-role="user"]',
     attachButton: '[data-testid="composer-plus-btn"]',
     copyButton: '[data-testid="copy-turn-action-button"]',
 };
 
 const promptInput = (page) => page.locator(SELECTORS.promptInput).first();
+
+const T0 = Date.now();
+const PHASES = [];
+function markPhase(name) {
+    PHASES.push([name, Date.now() - T0]);
+}
+function printTimings() {
+    if (PHASES.length === 0) return;
+    const parts = [];
+    for (let i = 0; i < PHASES.length; i++) {
+        const start = i === 0 ? 0 : PHASES[i - 1][1];
+        parts.push(`${PHASES[i][0]}=${((PHASES[i][1] - start) / 1000).toFixed(1)}s`);
+    }
+    console.log(`>> [timing] ${parts.join(", ")} | total=${((Date.now() - T0) / 1000).toFixed(1)}s`);
+}
 
 const isOnAuthPage = (page) => {
     const url = page.url();
@@ -237,6 +253,7 @@ function fileBlock(file) {
 const DECODE_NOTE = '\n\nAny <file> block with encoding="base64" contains base64-encoded bytes. Decode those blocks before analyzing them.';
 
 const NO_AUTH_MODAL = '[data-testid="modal-no-auth-login"]';
+const BLOCKER_SELECTOR = '[role="dialog"], [aria-modal="true"], [data-testid*="modal"], [class*="modal"], [class*="popover"]';
 const UPLOAD_OVERLAY_TEXT = /add\s+anything/i;
 const chipError = (name) => new Error(`attachment chip for "${name}" never appeared`);
 
@@ -253,14 +270,31 @@ async function uploadOverlayVisible(page) {
 }
 
 async function blockingDialogVisible(page) {
-    if (await modalVisible(page)) return true;
-    if (await uploadOverlayVisible(page)) return true;
-    const blockers = page.locator('[role="dialog"], [aria-modal="true"], [data-testid*="modal"], [class*="modal"], [class*="popover"]');
-    const count = await blockers.count();
-    for (let i = 0; i < count; i++) {
-        if (await blockers.nth(i).isVisible().catch(() => false)) return true;
-    }
-    return false;
+    return page
+        .evaluate(
+            ({ modalSelector, blockerSelector, overlaySource }) => {
+                const visible = (el) =>
+                    !!el &&
+                    (typeof el.checkVisibility === "function"
+                        ? el.checkVisibility()
+                        : !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+
+                if (visible(document.querySelector(modalSelector))) return true;
+                if (overlaySource && new RegExp(overlaySource, "i").test(document.body ? document.body.innerText : "")) {
+                    return true;
+                }
+                for (const el of document.querySelectorAll(blockerSelector)) {
+                    if (visible(el)) return true;
+                }
+                return false;
+            },
+            {
+                modalSelector: NO_AUTH_MODAL,
+                blockerSelector: BLOCKER_SELECTOR,
+                overlaySource: UPLOAD_OVERLAY_TEXT.source,
+            }
+        )
+        .catch(() => false);
 }
 
 async function clickDismissiveButton(page) {
@@ -599,27 +633,40 @@ function buildFullPrompt(question) {
     return question.text ? `${question.text}\n${body}` : body;
 }
 
-async function injectViaDom(page, text) {
+const COMPOSER_CHUNK = 6000;
+let composerKindLogged = false;
+
+async function prepareComposerProbe(page) {
+    return page
+        .evaluate((selector) => {
+            const el = document.querySelector(selector);
+            if (!el) return { ok: false, kind: null };
+
+            if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
+                return { ok: true, kind: `<${el.tagName.toLowerCase()}>` };
+            }
+
+            el.focus();
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            selection.addRange(range);
+            return { ok: true, kind: `<${el.tagName.toLowerCase()} contenteditable>` };
+        }, SELECTORS.promptInput)
+        .catch(() => ({ ok: false, kind: null }));
+}
+
+async function injectTextareaValue(page, text) {
     return page
         .evaluate(
             ({ selector, text }) => {
                 const el = document.querySelector(selector);
-                if (!el) return false;
-
-                if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
-                    const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-                    Object.getOwnPropertyDescriptor(proto, "value").set.call(el, text);
-                    el.dispatchEvent(new Event("input", { bubbles: true }));
-                    return true;
-                }
-
-                el.focus();
-                const selection = window.getSelection();
-                selection.removeAllRanges();
-                const range = document.createRange();
-                range.selectNodeContents(el);
-                selection.addRange(range);
-                return document.execCommand("insertText", false, text);
+                if (!el || (el.tagName !== "TEXTAREA" && el.tagName !== "INPUT")) return false;
+                const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                Object.getOwnPropertyDescriptor(proto, "value").set.call(el, text);
+                el.dispatchEvent(new Event("input", { bubbles: true }));
+                return true;
             },
             { selector: SELECTORS.promptInput, text }
         )
@@ -627,17 +674,99 @@ async function injectViaDom(page, text) {
         .catch(() => false);
 }
 
-async function pasteIntoComposer(page, text) {
-    if (await injectViaDom(page, text)) {
-        console.log(`>> Pasted ${(text.length / 1024).toFixed(1)} KB via DOM injection.`);
-        return;
+async function insertContenteditableChunk(page, chunk) {
+    return page
+        .evaluate((t) => document.execCommand("insertText", false, t), chunk)
+        .then((ok) => !!ok)
+        .catch(() => false);
+}
+
+async function composerTextLength(page) {
+    return page
+        .evaluate((sel) => {
+            const el = document.querySelector(sel);
+            return (el && el.innerText ? el.innerText : "").length;
+        }, SELECTORS.promptInput)
+        .catch(() => 0);
+}
+
+async function pasteViaClipboardKeys(page, input, text) {
+    const copied = await page
+        .evaluate((t) => navigator.clipboard.writeText(t), text)
+        .then(() => true)
+        .catch(() => false);
+    if (!copied) return false;
+
+    await focusComposer(input);
+    await page.waitForTimeout(250);
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+a" : "Control+a");
+    await page.waitForTimeout(80);
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+v" : "Control+v");
+
+    for (let check = 0; check < 5; check++) {
+        await page.waitForTimeout(300);
+        if ((await composerTextLength(page)) >= text.length * 0.7) return true;
+    }
+    return false;
+}
+
+async function pasteIntoComposer(page, input, text) {
+    const probe = await prepareComposerProbe(page);
+
+    if (probe.ok && !composerKindLogged) {
+        console.log(`>> Composer element is ${probe.kind}`);
+        composerKindLogged = true;
     }
 
-    console.log(`>> DOM injection unavailable, pasting ${(text.length / 1024).toFixed(1)} KB in chunks via insertText...`);
-    const CHUNK = 2000;
-    for (let offset = 0; offset < text.length; offset += CHUNK) {
-        await page.keyboard.insertText(text.slice(offset, offset + CHUNK));
-        await page.waitForTimeout(40);
+    let injected = false;
+    let partialOffset = 0;
+
+    if (probe.ok && (probe.kind === "<textarea>" || probe.kind === "<input>")) {
+        injected = await injectTextareaValue(page, text);
+        if (injected) console.log(`>> Pasted ${(text.length / 1024).toFixed(1)} KB via native value setter.`);
+    } else if (probe.ok) {
+        injected = await pasteViaClipboardKeys(page, input, text);
+        if (injected) {
+            console.log(`>> Pasted ${(text.length / 1024).toFixed(1)} KB via clipboard (Ctrl+V).`);
+        }
+    }
+
+    if (!injected && probe.ok) {
+        // Fallback: a single execCommand with tens of KB blocks the page for minutes, so feed it slices.
+        const totalChunks = Math.ceil(text.length / COMPOSER_CHUNK);
+        const milestones = new Set([1, Math.ceil(totalChunks / 4), Math.ceil(totalChunks / 2), totalChunks]);
+
+        let offset = 0;
+        let chunkIndex = 0;
+        while (offset < text.length) {
+            let end = Math.min(offset + COMPOSER_CHUNK, text.length);
+            const lastCode = text.charCodeAt(end - 1);
+            if (lastCode >= 0xd800 && lastCode <= 0xdbff && end < text.length) end += 1;
+
+            if (!(await insertContenteditableChunk(page, text.slice(offset, end)))) break;
+
+            offset = end;
+            partialOffset = offset;
+            chunkIndex += 1;
+            if (milestones.has(chunkIndex)) {
+                console.log(`>> Injected ${Math.round((offset / text.length) * 100)}% (${(offset / 1024).toFixed(1)} KB)...`);
+            }
+            if (offset < text.length) await page.waitForTimeout(25);
+        }
+        injected = partialOffset >= text.length;
+
+        if (injected) {
+            console.log(`>> Pasted ${(text.length / 1024).toFixed(1)} KB into composer in ${totalChunks} slice(s).`);
+        }
+    }
+
+    if (!injected) {
+        if (partialOffset > 0) await input.fill("").catch(() => {});
+        console.log(`>> DOM injection unavailable, pasting ${(text.length / 1024).toFixed(1)} KB in chunks via insertText...`);
+        for (let offset = 0; offset < text.length; offset += 2000) {
+            await page.keyboard.insertText(text.slice(offset, offset + 2000));
+            await page.waitForTimeout(40);
+        }
     }
 }
 
@@ -650,10 +779,10 @@ async function typePrompt(page, input, question, attached) {
 
     const payload = pasteFiles ? buildFullPrompt(question) : question.text;
     if (payload) {
-        await pasteIntoComposer(page, payload);
+        await pasteIntoComposer(page, input, payload);
     }
 
-    await page.waitForTimeout(pasteFiles ? 1500 : 800);
+    await page.waitForTimeout(pasteFiles ? 500 : 400);
 }
 
 async function promptHasExpectedText(page, expectedParts) {
@@ -666,6 +795,7 @@ async function promptHasExpectedText(page, expectedParts) {
 
 async function sendQuestion(page, question) {
     const input = await waitForChatGPTReady(page);
+    markPhase("ready");
     const assistantCountBefore = await page.locator(SELECTORS.assistantMessage).count();
 
     let attached = false;
@@ -696,34 +826,47 @@ async function sendQuestion(page, question) {
     if (!attached && question.files.length > 0) expectedParts.push("</file>");
 
     console.log(">> Writing prompt...");
+    let verified = false;
     for (let attempt = 1; attempt <= 3; attempt++) {
         await typePrompt(page, finalInput, question, attached);
-        if (await promptHasExpectedText(page, expectedParts)) break;
+        if (await promptHasExpectedText(page, expectedParts)) {
+            verified = true;
+            break;
+        }
 
         console.log(`>> Prompt text did not stick (attempt ${attempt}/3), retyping...`);
         await dismissAndSettle(page, 500);
     }
-
-    await focusComposer(finalInput);
-    await dismissBlockingUI(page);
+    if (!verified) await focusComposer(finalInput);
+    markPhase("write");
 
     console.log(">> Sending prompt...");
     const sendButton = page.locator(SELECTORS.sendButton).first();
-    await trySend(page, sendButton, { requireVisible: true });
-    await page.waitForTimeout(1500);
+    const userMessages = page.locator(SELECTORS.userMessage);
+    const userCountBefore = await userMessages.count();
 
-    const userMessages = page.locator('[data-message-author-role="user"]');
-    const userCount = await userMessages.count();
-    if (userCount === 0) {
+    await trySend(page, sendButton, { requireVisible: true });
+
+    const sentDetected = await page
+        .waitForFunction(
+            ({ selector, before }) => document.querySelectorAll(selector).length > before,
+            { selector: SELECTORS.userMessage, before: userCountBefore },
+            { timeout: 5000 }
+        )
+        .then(() => true)
+        .catch(() => false);
+
+    if (!sentDetected) {
         console.log(">> Send may have failed, retrying...");
         await dismissAndSettle(page);
         const retryInput = promptInput(page);
-        if (await retryInput.count() > 0) {
+        if ((await retryInput.count()) > 0) {
             await focusComposer(retryInput);
         }
         await trySend(page, sendButton);
         await page.waitForTimeout(2000);
     }
+    markPhase("send");
 
     return assistantCountBefore;
 }
@@ -799,13 +942,16 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
         prevLength = lastLength;
     }
 
-    const markdown = await extractAnswerMarkdown(page, answer);
+    markPhase("generate");
+    let markdown = await extractAnswerMarkdown(page, answer);
     if (markdown) {
         console.log(">> Raw Markdown captured via copy button.");
-        return markdown;
+    } else {
+        console.log(">> Copy button unavailable, falling back to rendered text.");
+        markdown = await answer.innerText();
     }
-    console.log(">> Copy button unavailable, falling back to rendered text.");
-    return answer.innerText();
+    markPhase("extract");
+    return markdown;
 }
 
 async function runLoginFlow(page) {
@@ -1043,6 +1189,7 @@ async function main() {
     const question = loginOnly ? null : loadQuestion();
 
     const context = await launchBrowser();
+    markPhase("browser");
     await context.grantPermissions(["clipboard-read", "clipboard-write"]).catch(() => {});
     let shuttingDown = false;
     const shutdown = async () => {
@@ -1070,6 +1217,8 @@ async function main() {
         console.log("\n--- ANSWER ---\n");
         console.log(answer.trim());
         fs.writeFileSync(CLI.outputFile, answer.trim() + "\n", "utf8");
+        markPhase("save");
+        printTimings();
         console.log(`\n>> Answer saved to ${CLI.outputFile}`);
     } finally {
         await context.close();

@@ -1,98 +1,98 @@
-Honestly, this is **pretty ambitious and surprisingly robust** for a Playwright automation script. It feels less like a quick scraper and more like you’ve tried to build a small CLI client around the ChatGPT web UI.
+Honestly? **This is pretty solid engineering for a browser-automation script.** It’s much more defensive than the average Playwright script. You’ve clearly been fighting real-world ChatGPT UI weirdness rather than assuming selectors and timing will always behave.
 
 ### What I like
 
-* **Good failure handling.** The browser fallback chain, retries, popup dismissal, attachment fallbacks, and prompt verification show that you’re thinking about real-world browser automation rather than the happy path.
-* **Persistent profiles** are a good choice. Keeping separate Chrome/Brave/Edge profiles means you don't have to automate login every time.
-* **The CLI design is nice.** Things like:
+* **Good fallback philosophy.** Upload → chooser → drag/drop, and native value injection → clipboard → chunked `insertText` → keyboard typing. That's unusually robust.
+* **Persistent browser profiles** are a good choice for maintaining sessions without storing credentials yourself.
+* **Browser fallback/configuration** is nicely thought out. Chrome → Brave → Edge, configurable ordering, availability detection, etc.
+* **The prompt verification is excellent.** Retrying if the text didn't actually land in the composer is exactly the sort of thing browser automation needs.
+* **Answer extraction via the Copy button** is much better than scraping rendered HTML. Getting Markdown from the clipboard preserves formatting much better.
+* **The stability heuristic** is sensible:
 
-  * `--login`
-  * `--clear-session`
-  * `--browser`
-  * `--browser-order`
-  * `--output`
-  * `@file.js`
+  ```js
+  lastLength === prevLength && !stopVisible
+  ```
 
-  make this much more usable as a command-line tool.
-* **The file handling is thoughtful.** Text files get embedded as code blocks, while binary files get base64 encoded. `codeFenceFor()` is a particularly nice touch because it handles files containing triple backticks.
-* **You verify that the prompt actually landed** before sending it. That's exactly the sort of defensive behavior browser automation needs.
-* **Copy-button extraction** is clever. Getting the answer through ChatGPT's copy action can preserve Markdown much better than `innerText()`.
+  rather than assuming "network idle" means the model is finished.
+* `codeFenceFor()` is a nice touch. People often forget that pasted source can itself contain triple backticks.
+* The CLI is surprisingly polished for a single-file script.
 
-### The biggest problem
+### The biggest issue: you're coupling yourself *very* tightly to ChatGPT's UI
 
-The elephant in the room is that you're automating **ChatGPT's private web UI rather than using an API**.
+This is the main thing I'd worry about.
 
-That makes this inherently brittle. Selectors such as:
-
-```js
-[data-testid="send-button"]
-[data-testid="stop-button"]
-[data-message-author-role="assistant"]
-#prompt-textarea
-```
-
-can change without notice.
-
-The same goes for:
+Things like:
 
 ```js
-[data-testid="modal-no-auth-login"]
+"#prompt-textarea"
+'[data-testid="send-button"]'
+'[data-message-author-role="assistant"]'
+'[data-testid="copy-turn-action-button"]'
 ```
 
-and especially the popup-detection logic based on text/class names.
+are implementation details of the website, not a stable API contract.
 
-So I'd think of this as:
+So your architecture is robust **against transient UI problems**, but fragile **against upstream UI changes**.
 
-> **a useful personal automation tool, not a stable ChatGPT client/library.**
+That's an important distinction.
 
-If that's the goal, totally reasonable. If you're trying to distribute this or build something other people depend on, I'd reconsider the architecture.
+I'd put the abstraction boundary around ChatGPT itself. For example, conceptually:
 
-### One thing I'd definitely change
-
-You have **two `pasteIntoComposer()` declarations**.
-
-The first one uses clipboard:
-
-```js
-async function pasteIntoComposer(page, text) {
-    const viaClipboard = await page
-        .evaluate((content) => navigator.clipboard.writeText(content))
-    ...
-}
+```text
+ChatGPTAdapter
+  ├── open()
+  ├── waitUntilReady()
+  ├── attachFiles()
+  ├── submitPrompt()
+  ├── waitForCompletion()
+  └── extractResponse()
 ```
 
-Then later you redefine it:
+Then all the ugly selectors/retries/fallbacks live inside that adapter.
 
-```js
-async function pasteIntoComposer(page, text) {
-    if (await injectViaDom(page, text)) {
-        ...
-    }
-    ...
-}
+That would make the rest of your program almost boring—which is exactly what you want.
+
+---
+
+### There's also some unnecessary complexity
+
+`dismissBlockingUI()` is doing a *lot*.
+
+You have:
+
+* modal detection
+* overlay detection
+* generic dialog detection
+* text-pattern matching
+* forced clicks
+* Escape fallback
+* retries
+* reload fallback elsewhere
+
+That's understandable given what you've encountered, but I'd consider making the state machine more explicit.
+
+Right now the program often says:
+
+> Something might be blocking us → inspect a bunch of things → try several things → maybe reload → continue.
+
+A cleaner model would be something like:
+
+```text
+READY
+AUTH_REQUIRED
+POPUP_BLOCKING
+UPLOAD_UI_OPEN
+GENERATING
+ERROR
 ```
 
-Because these are function declarations in the same scope, the later declaration wins. So the entire first implementation is effectively dead code.
+and each transition has one responsibility.
 
-I'd remove the first one.
+That would make debugging substantially easier.
 
-### Another potentially nasty bug
+---
 
-This:
-
-```js
-const URL = "https://chatgpt.com/";
-```
-
-is fine in the actual JS, but the code you pasted contains Markdown-escaped URLs like:
-
-```js
-const URL = "[https://chatgpt.com/](https://chatgpt.com/)";
-```
-
-If that's literally what's in `index.js`, `page.goto()` obviously won't work. I'm assuming that's just formatting introduced when you pasted the file.
-
-### Your session handling worries me a bit
+### One actual bug-ish thing I'd change
 
 This:
 
@@ -104,85 +104,87 @@ function clearSessionData(profileDir) {
         "Local Storage",
         "leveldb"
     );
+    ...
+}
 ```
 
-is pretty destructive and also browser-implementation-dependent.
+is **not really "clear session" in a general sense**.
 
-More importantly, you're manipulating browser profile state directly with:
+You're selectively deleting Local Storage LevelDB files. Cookies, IndexedDB, service-worker state, Cache Storage, etc. remain.
+
+Worse, because this is a Chromium profile, deleting LevelDB files while Chromium isn't running is one thing; I'd make the semantics much clearer.
+
+I'd rename it to something like:
+
+```js
+clearLocalStorageLevelDb()
+```
+
+or, if the intention genuinely is "forget the ChatGPT session", use a more deliberate profile reset strategy.
+
+The current name promises more than the implementation does.
+
+---
+
+### Another thing I'd rethink: `markProfileClean()`
+
+This:
 
 ```js
 prefs.profile.exit_type = "Normal";
 prefs.profile.exited_cleanly = true;
 ```
 
-I'd avoid modifying Chromium's internal profile files unless you have a very specific reason. It can work, but it's the kind of thing that can create strange profile corruption or version-specific behavior.
+is clever, but it's also manipulating Chromium's internal profile state to suppress crash-recovery behavior.
 
-### `attachViaDrop()` is clever but fragile
+I'd avoid modifying browser profile metadata unless there's a demonstrated need. It creates a weird possibility where your automation makes Chromium believe something happened that didn't.
 
-This is an interesting hack:
+If the only goal is suppressing the crash bubble, I'd rather solve that with supported launch behavior if possible.
 
-```js
-target.dispatchEvent(
-    new DragEvent("drop", {
-        bubbles: true,
-        cancelable: true,
-        dataTransfer: dt
-    })
-);
-```
+---
 
-But you're essentially trying to reproduce browser drag/drop behavior from JavaScript.
-
-I'd rank your attachment strategies approximately:
-
-1. `setInputFiles()` — best
-2. Playwright `filechooser` — good
-3. synthetic drag/drop — last resort
-
-So your fallback ordering makes sense.
-
-### Your answer-completion detection could be improved
-
-Currently you're essentially saying:
-
-> "The answer hasn't changed for 3 seconds and the stop button isn't visible, therefore we're done."
-
-That's reasonable, but not bulletproof.
-
-For example, a response could temporarily stop changing for 3 seconds while generation is still happening.
-
-I'd make the completion logic primarily depend on the UI's generation state, with text stability as a fallback.
-
-Something along the lines of:
-
-```text
-stop button disappears
-        ↓
-wait briefly
-        ↓
-answer length remains stable
-        ↓
-extract
-```
-
-rather than stability being the main signal.
-
-### There's also a subtle answer-index assumption
-
-You do:
-
-```js
-const answerIndex = assistantCountBefore;
-const answer = replies.nth(answerIndex);
-```
-
-This assumes the newly created assistant response will be exactly the next assistant DOM element.
-
-Usually that's probably true, but web apps can insert things into the DOM asynchronously. A more robust approach would be to identify the **newest assistant message associated with the newly submitted user message**, rather than relying entirely on an index.
-
-### `parseQuestion()` is convenient but has an ambiguity
+### Your file handling is clever, but there's a trap
 
 This:
+
+```js
+const truncated = content.length > MAX_FILE_CHARS;
+if (truncated) content = content.slice(0, MAX_FILE_CHARS);
+```
+
+means **binary data is also truncated at 150,000 base64 characters**.
+
+So if someone gives you a binary file, you're potentially handing the model an incomplete base64 representation.
+
+You do warn:
+
+```js
+Decode those blocks before analyzing them.
+```
+
+but that's not enough—the data itself may be incomplete.
+
+I'd distinguish:
+
+```js
+MAX_TEXT_CHARS
+MAX_BINARY_BYTES
+```
+
+and ideally make the behavior explicit:
+
+```text
+text > limit  → truncate
+binary > limit → reject / attach instead
+```
+
+In fact, since you're already uploading non-text files when possible, I'd probably **never convert a binary file to base64 unless upload genuinely isn't possible**.
+
+---
+
+### `parseQuestion()` could surprise users
+
+This part:
 
 ```js
 if (looksLikeExistingFile(arg)) {
@@ -191,73 +193,135 @@ if (looksLikeExistingFile(arg)) {
 }
 ```
 
-means any existing file path passed as an argument automatically becomes an attachment.
-
-That's convenient, but it makes it impossible to ask something like:
+means:
 
 ```bash
-node index.js "Explain the file README.md"
+node index.js hello.txt
 ```
 
-if `README.md` happens to exist in the current directory.
+is interpreted as a file attachment rather than the question:
 
-Your `@file` convention is actually cleaner:
+> "hello.txt"
+
+That's probably intentional, but it's ambiguous.
+
+And this:
+
+```js
+arg.split(/\s+/)
+```
+
+means quoted multi-word arguments have already lost their quoting semantics by the time you process them.
+
+For a CLI tool, I'd strongly consider explicit syntax:
 
 ```bash
-node index.js "Explain this" @README.md
+node index.js "Explain this" @index.js @package.json
 ```
 
-I'd consider making `@file` the explicit attachment syntax and leaving ordinary arguments as text.
+and only treat `@something` as a file.
 
-### Architecture-wise, I'd split this up
+That gives you deterministic behavior.
 
-`index.js` is doing **a lot**.
+---
 
-I'd probably end up with something like:
+### `waitForAnswer()` is good, but I'd improve the completion detection
+
+This:
+
+```js
+!stopVisible
+```
+
+is useful, but I wouldn't make it part of the definition of completion.
+
+I'd combine several signals:
+
+```text
+new assistant message exists
++
+content length has stopped changing
++
+stop button absent
++
+send button/composer becomes available
+```
+
+You already have most of these pieces.
+
+Also, a response that legitimately ends with a very short amount of text could interact oddly with:
+
+```js
+lastLength > 0
+```
+
+Not a huge issue, just something I'd make explicit.
+
+---
+
+### Security-wise, there's an important consideration
+
+You're essentially building a **local browser agent that can submit arbitrary prompts to a logged-in ChatGPT account**.
+
+That means the browser profile becomes a very sensitive asset.
+
+I'd make sure:
+
+* profile directories are in `.gitignore`
+* `.browser-prefs.json` is in `.gitignore` if appropriate
+* output files aren't accidentally committed
+* the tool doesn't accept untrusted commands/prompts without the user realizing what account they're using
+* you don't log sensitive prompt contents
+* you don't expose the Playwright debugging endpoint
+
+And particularly: **don't distribute the `user-data-*` directories.**
+
+---
+
+## One architectural change I'd strongly recommend
+
+Right now everything lives in one ~large file.
+
+I'd split it into roughly:
 
 ```text
 src/
   cli.js
-  browser.js
-  chatgpt.js
+  browsers.js
+  files.js
+  composer.js
   attachments.js
-  prompts.js
-  extraction.js
-  profiles.js
+  chatgpt.js
+  answer.js
   main.js
 ```
 
-The biggest separation I'd want is:
+with `chatgpt.js` being the only place that knows:
 
-**browser lifecycle**
-vs.
-**ChatGPT interaction**
-vs.
-**CLI/file handling**
+```js
+"#prompt-textarea"
+"[data-testid='send-button']"
+...
+```
 
-That would make it much easier to replace selectors or change the browser strategy later.
+Then when ChatGPT changes its UI, you hopefully only touch one module.
 
 ---
 
 ## Overall
 
-I'd give the engineering effort roughly **8/10**, with the caveat that the underlying approach is inherently fragile.
+I'd give the **engineering approach ~8/10**.
 
-The impressive part isn't the amount of code; it's that you've clearly anticipated a bunch of annoying automation problems:
+Not because it's elegant—it's actually somewhat over-engineered—but because the over-engineering is mostly aimed at **real failure modes**.
 
-**login → persistent session → popup → composer → large prompt → attachments → send verification → generation detection → Markdown extraction → browser fallback → CLI configuration.**
+The biggest weakness isn't reliability within the current UI. You've done a good job there.
 
-That's a legitimate little automation framework.
+It's **maintainability against ChatGPT changing underneath you**.
 
-The main thing I'd do next isn't add more features. I'd **reduce fragility and complexity**:
+If this is just a personal utility, I'd happily keep much of it.
 
-1. Remove the duplicate `pasteIntoComposer()`.
-2. Make file attachment syntax explicit.
-3. Centralize selectors.
-4. Separate browser/chat/CLI modules.
-5. Improve response-completion detection.
-6. Stop modifying Chromium's internal profile files where possible.
-7. Add structured logging/debug screenshots when something fails.
-8. Treat the web UI as an unstable adapter rather than the core of the application.
+If you're intending to turn it into a tool other people depend on, I'd make the next iteration:
 
-If this is intended as a **personal "ask ChatGPT from the terminal" tool**, though, you're already pretty far along.
+**UI adapter + explicit state machine + cleaner CLI semantics + separated file handling.**
+
+And one other observation: your instinct to use the browser rather than an API is understandable if you're specifically trying to automate the normal ChatGPT web experience, but it inherently gives you much less stability than an official API integration.
