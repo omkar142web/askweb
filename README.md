@@ -9,6 +9,8 @@ Automate ChatGPT from the command line using a real Chromium-based browser with 
 - File attachment support: text/code files pasted inline, binary files uploaded
 - Multiple browser fallback: Chrome, Brave, Edge (configurable order)
 - Login flow with session persistence across runs
+- Works from any working directory: browser profiles, preferences, and history are anchored to the install location
+- Visible progress while waiting for login instead of silent hangs
 - Conversation history with `--continue` and `--new` flags
 - Output saved to Markdown by default
 - Automatic dismissal of login prompts, popups, and blocking dialogs
@@ -52,6 +54,8 @@ npm run wipe
 ```
 
 ## Quick Start
+
+`askweb` (global) and `node index.js` are interchangeable in all examples below. You can run either from any directory; only `-o <path>` resolves relative to your current working directory.
 
 ```bash
 # Ask a question
@@ -153,7 +157,7 @@ For binary uploads, the following strategies are tried in order:
 
 ## Conversation History
 
-Conversation history is saved to `.chatgpt-conversations.json` at the project root. Up to 20 conversations are retained.
+Conversation history is saved to `.chatgpt-conversations.json` in the askweb install directory. Up to 20 conversations are retained.
 
 Each entry stores:
 - `id` (from URL UUID or generated)
@@ -178,11 +182,13 @@ The tool grants `clipboard-read` and `clipboard-write` permissions to the browse
 
 ## Browser Profiles
 
-Persistent profiles are stored in:
+Persistent profiles are stored in the askweb install directory (resolved against the install location, not your current working directory):
 
-- `./user-data-chrome` (Chrome)
-- `./user-data-brave` (Brave)
-- `./user-data-edge` (Edge)
+- `user-data-chrome` (Chrome)
+- `user-data-brave` (Brave)
+- `user-data-edge` (Edge)
+
+Because profile paths are anchored to the install directory, your login session is shared across every invocation regardless of where you run `askweb` from.
 
 These directories contain cookies, localStorage, and session state and are **not** tracked in version control.
 
@@ -190,7 +196,7 @@ Profile directories are cleaned on exit by setting `exit_type=Normal` and `exite
 
 ## Configuration
 
-Preferences are stored in `.browser-prefs.json` at the project root:
+Preferences are stored in `.browser-prefs.json` in the askweb install directory:
 
 ```json
 {
@@ -231,6 +237,10 @@ The configured preferred browser is tried first, followed by the saved order, th
 # Prompt input never appears
 # - Run: node index.js --login
 # - Log in manually within 10 minutes
+
+# Waiting for login message keeps repeating
+# - The active browser profile has no ChatGPT session
+# - Log in inside the opened window, or run: node index.js --clear-session --login
 
 # Answer contains no Markdown formatting
 # - The copy button may be unavailable

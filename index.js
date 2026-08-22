@@ -101,6 +101,7 @@ function showHelp() {
     console.log(`ChatGPT CLI
 
 Usage:
+  askweb [options] [question] [files...]
   node index.js [options] [question] [files...]
 
 Ask ChatGPT a question directly from your terminal. Files passed as arguments
@@ -111,6 +112,7 @@ Arguments:
   question                Question text (default: "${DEFAULT_QUESTION}")
   files...                Files to attach; "@path" also references a file
   Use "--" before the question to treat leading dashes as literal text.
+  Options can appear anywhere before "--".
 
 Options:
   -o, --output <file>     Save the answer to a file (default: ${DEFAULT_OUTPUT_FILE})
@@ -132,12 +134,21 @@ Conversations:
   saved transcript into a new chat so full context carries over (works
   even when logged out).
 
+Notes:
+  Browser profiles and history live in the install directory, so you can
+  run askweb from any working directory; only -o resolves relative to
+  your current directory.
+  If the browser opens but you are not logged in, log in inside the window
+  or run once with --login; the session persists for future runs.
+
 Examples:
-  node index.js "Explain event loops"
-  node index.js --continue "Give me 3 examples"
-  node index.js --new "Start a fresh discussion about React"
-  node index.js "Review this code" src/index.js utils.js
-  node index.js "Summarize" @notes.md -o summary.md`);
+  askweb "Explain event loops"
+  askweb -o result.md "Explain quantum computing"
+  askweb --continue "Give me 3 examples"
+  askweb --new "Start a fresh discussion about React"
+  askweb "Review this code" src/index.js utils.js
+  askweb -o summary.md "Summarize" @notes.md
+  askweb -o out.md -- "-explain this flag"`);
 }
 
 function parseCliArgs(argv = process.argv.slice(2)) {
