@@ -920,8 +920,7 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
 
     let stableCount = 0;
     let prevLength = -1;
-    const answerIndex = assistantCountBefore;
-    const answer = replies.nth(answerIndex);
+    const answer = replies.last();
     await answer.waitFor({ state: "visible", timeout: 60000 });
 
     while (stableCount < STABLE_POLLS_REQUIRED) {
