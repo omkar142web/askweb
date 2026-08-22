@@ -88,6 +88,38 @@ const POPUP_DISMISS_PATTERNS = [
 
 chromium.use(stealth);
 
+const VERSION = require("./package.json").version;
+
+function showHelp() {
+    console.log(`ChatGPT CLI
+
+Usage:
+  node index.js [options] [question] [files...]
+
+Ask ChatGPT a question directly from your terminal. Files passed as arguments
+(or referenced with @path) are attached to the prompt; text/code files are
+pasted inline, other files are uploaded.
+
+Arguments:
+  question                Question text (default: "${DEFAULT_QUESTION}")
+  files...                Files to attach; "@path" also references a file
+
+Options:
+  -o, --output <file>     Save the answer to a file (default: ${DEFAULT_OUTPUT_FILE})
+      --login             Open ChatGPT to log in and save the session
+      --browser           Configure default browser interactively
+      --browser-order     Configure browser fallback order
+      --browser-reset     Reset browser preferences to automatic
+      --clear-session     Clear saved local storage on launch
+  -h, --help              Show this help
+  -v, --version           Show version
+
+Examples:
+  node index.js "Explain event loops"
+  node index.js "Review this code" src/index.js utils.js
+  node index.js "Summarize" @notes.md -o summary.md`);
+}
+
 function parseCliArgs(argv = process.argv.slice(2)) {
     const options = {
         login: false,
@@ -95,6 +127,8 @@ function parseCliArgs(argv = process.argv.slice(2)) {
         configureBrowser: false,
         configureBrowserOrder: false,
         resetBrowserPrefs: false,
+        showHelp: false,
+        showVersion: false,
         outputFile: DEFAULT_OUTPUT_FILE,
         questionArgs: [],
     };
@@ -132,6 +166,16 @@ function parseCliArgs(argv = process.argv.slice(2)) {
             continue;
         }
 
+        if (arg === "--help" || arg === "-h") {
+            options.showHelp = true;
+            continue;
+        }
+
+        if (arg === "--version" || arg === "-v") {
+            options.showVersion = true;
+            continue;
+        }
+
         if (arg === "--output" || arg === "-o") {
             const value = argv[i + 1];
             if (!value) throw new Error(`${arg} requires a file path`);
@@ -148,7 +192,7 @@ function parseCliArgs(argv = process.argv.slice(2)) {
         }
 
         if (arg.startsWith("-")) {
-            throw new Error(`Unknown option: ${arg}`);
+            throw new Error(`Unknown option: ${arg}\nRun \`node index.js --help\` for usage.`);
         }
 
         options.questionArgs.push(arg);
@@ -157,7 +201,14 @@ function parseCliArgs(argv = process.argv.slice(2)) {
     return options;
 }
 
-const CLI = parseCliArgs();
+const CLI = (() => {
+    try {
+        return parseCliArgs();
+    } catch (error) {
+        console.error(`Error: ${firstLine(error)}`);
+        process.exit(1);
+    }
+})();
 
 function wantsLogin() {
     return CLI.login;
@@ -1180,6 +1231,9 @@ function loadQuestion() {
 }
 
 async function main() {
+    if (CLI.showHelp) return showHelp();
+    if (CLI.showVersion) return console.log(`ChatGPT CLI v${VERSION}`);
+
     if (CLI.configureBrowser) return configureDefaultBrowser();
     if (CLI.configureBrowserOrder) return configureBrowserOrder();
     if (CLI.resetBrowserPrefs) return resetBrowserPreferences();
