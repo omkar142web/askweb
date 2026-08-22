@@ -43,6 +43,13 @@ const SELECTORS = {
     attachButton: '[data-testid="composer-plus-btn"]',
 };
 
+const promptInput = (page) => page.locator(SELECTORS.promptInput).first();
+
+const isOnAuthPage = (page) => {
+    const url = page.url();
+    return url.includes("/auth/login") || url.includes("/auth/signin");
+};
+
 const POPUP_DISMISS_PATTERNS = [
     { text: /stay\s*logged\s*out/i, label: "Stay logged out" },
     { text: /continue\s+logged\s*out/i, label: "Continue logged out" },
@@ -154,9 +161,14 @@ function stripShellQuotes(value) {
     return value.trim().replace(/^["']+|["']+$/g, "");
 }
 
+function firstLine(error) {
+    return error.message.split("\n")[0];
+}
+
 function looksLikeExistingFile(value) {
     try {
-        return fs.existsSync(path.resolve(value)) && fs.statSync(path.resolve(value)).isFile();
+        const fullPath = path.resolve(value);
+        return fs.existsSync(fullPath) && fs.statSync(fullPath).isFile();
     } catch {
         return false;
     }
@@ -191,6 +203,7 @@ const DECODE_NOTE = "\n\nThe file contents above are base64-encoded UTF-8. Decod
 
 const NO_AUTH_MODAL = '[data-testid="modal-no-auth-login"]';
 const UPLOAD_OVERLAY_TEXT = /add\s+anything/i;
+const chipError = (name) => new Error(`attachment chip for "${name}" never appeared`);
 
 async function modalVisible(page) {
     const modal = page.locator(NO_AUTH_MODAL).first();
@@ -276,6 +289,31 @@ async function dismissBlockingUI(page) {
     return dismissed;
 }
 
+async function dismissAndSettle(page, ms = 1000) {
+    await dismissBlockingUI(page);
+    await page.waitForTimeout(ms);
+}
+
+async function focusComposer(input) {
+    await input.click();
+    await input.focus();
+}
+
+async function trySend(page, sendButton, { requireVisible = false, force = false } = {}) {
+    if (
+        (await sendButton.count()) > 0 &&
+        (!requireVisible || (await sendButton.isVisible().catch(() => false)))
+    ) {
+        try {
+            await sendButton.click({ force });
+        } catch {
+            await page.keyboard.press("Enter");
+        }
+    } else {
+        await page.keyboard.press("Enter");
+    }
+}
+
 async function resetComposer(page) {
     await dismissBlockingUI(page);
     if (!(await uploadOverlayVisible(page))) return;
@@ -294,7 +332,7 @@ async function gotoChatGPT(page) {
             return;
         } catch (error) {
             lastError = error;
-            const message = error.message.split("\n")[0];
+            const message = firstLine(error);
             console.log(`>> ChatGPT navigation failed (${message}), retrying ${attempt}/3...`);
             await page.waitForTimeout(3000);
         }
@@ -303,7 +341,7 @@ async function gotoChatGPT(page) {
 }
 
 async function isPromptReady(page) {
-    const input = page.locator(SELECTORS.promptInput).first();
+    const input = promptInput(page);
     if ((await input.count()) === 0) return false;
     if (!(await input.isVisible().catch(() => false))) return false;
 
@@ -334,12 +372,11 @@ async function waitForChatGPTReady(page) {
         throw new Error(`Prompt input never became usable at ${page.url()}. Page text: ${pageText.replace(/\s+/g, " ").trim() || "(empty)"}. Run \`node index.js --login\` to log in manually.`);
     }
 
-    const input = page.locator(SELECTORS.promptInput).first();
+    const input = promptInput(page);
     try {
         await input.click({ timeout: 10000, force: true });
     } catch {
-        await dismissBlockingUI(page);
-        await page.waitForTimeout(1000);
+        await dismissAndSettle(page);
         await input.waitFor({ state: "visible", timeout: 15000 });
         await waitForEnabled(page, input);
         await input.click({ timeout: 10000, force: true });
@@ -362,7 +399,7 @@ async function waitForEnabled(page, input) {
 }
 
 async function waitForPromptInput(page) {
-    const input = page.locator(SELECTORS.promptInput).first();
+    const input = promptInput(page);
 
     try {
         await input.waitFor({ state: "visible", timeout: 20000 });
@@ -419,7 +456,7 @@ async function waitForAttachmentChip(page, firstName) {
 }
 
 async function attachViaDrop(page, files) {
-    await page.locator(SELECTORS.promptInput).first().click();
+    await promptInput(page).click();
     for (const file of files) {
         const b64 = fs.readFileSync(file.fullPath).toString("base64");
         await page.evaluate(
@@ -465,7 +502,7 @@ async function attachViaChooser(page, files) {
     await chooser.setFiles(files.map((file) => file.fullPath));
 
     if (!(await waitForAttachmentChip(page, files[0].name))) {
-        throw new Error(`attachment chip for "${files[0].name}" never appeared`);
+        throw chipError(files[0].name);
     }
 }
 
@@ -479,7 +516,7 @@ async function attachViaFileInput(page, files) {
         try {
             await inputs.nth(i).setInputFiles(files.map((f) => f.fullPath), { timeout: 5000 });
             if (!(await waitForAttachmentChip(page, files[0].name))) {
-                throw new Error(`attachment chip for "${files[0].name}" never appeared`);
+                throw chipError(files[0].name);
             }
             return;
         } catch (error) {
@@ -499,7 +536,7 @@ async function attachFiles(page, files) {
             await dismissBlockingUI(page);
             throw new Error(`upload overlay rejected "${files[0].name}"`);
         }
-        console.log(`>> File-input attach failed (${inputError.message.split("\n")[0]}), trying chooser...`);
+        console.log(`>> File-input attach failed (${firstLine(inputError)}), trying chooser...`);
         try {
             await attachViaChooser(page, files);
             return "chooser";
@@ -508,13 +545,13 @@ async function attachFiles(page, files) {
                 await dismissBlockingUI(page);
                 throw new Error(`upload overlay rejected "${files[0].name}"`);
             }
-            console.log(`>> Chooser attach failed (${chooserError.message.split("\n")[0]}), trying drag/drop...`);
+            console.log(`>> Chooser attach failed (${firstLine(chooserError)}), trying drag/drop...`);
             try {
                 await attachViaDrop(page, files);
                 return "drop";
             } catch (dropError) {
                 await dismissBlockingUI(page);
-                throw new Error(`all attach strategies failed: ${dropError.message.split("\n")[0]}`);
+                throw new Error(`all attach strategies failed: ${firstLine(dropError)}`);
             }
         }
     }
@@ -528,8 +565,7 @@ function buildFullPrompt(question) {
 async function typePrompt(page, input, question, attached) {
     await dismissBlockingUI(page);
 
-    await input.click();
-    await input.focus();
+    await focusComposer(input);
     await input.fill("");
 
     const pasteFiles = !attached && question.files.length > 0;
@@ -544,9 +580,7 @@ async function typePrompt(page, input, question, attached) {
 
 async function promptHasExpectedText(page, expectedParts) {
     if (expectedParts.length === 0) return true;
-    const typed = await page
-        .locator(SELECTORS.promptInput)
-        .first()
+    const typed = await promptInput(page)
         .evaluate((el) => ("value" in el ? el.value : el.innerText || el.textContent || ""))
         .catch(() => "");
     return expectedParts.every((part) => typed.includes(part));
@@ -568,18 +602,17 @@ async function sendQuestion(page, question) {
                 console.log(`>> Attached ${question.files.length} file(s) via upload.`);
                 await page.waitForTimeout(3000);
             } catch (error) {
-                console.log(`>> Upload failed (${error.message.split("\n")[0]}), falling back to paste.`);
+                console.log(`>> Upload failed (${firstLine(error)}), falling back to paste.`);
                 await resetComposer(page);
             }
         }
     }
 
     if (!(await isPromptReady(page))) {
-        await dismissBlockingUI(page);
-        await page.waitForTimeout(1000);
+        await dismissAndSettle(page);
     }
 
-    const finalInput = page.locator(SELECTORS.promptInput).first();
+    const finalInput = promptInput(page);
     const expectedParts = [];
     if (question.text) expectedParts.push(question.text.trim().slice(0, 60));
     if (!attached && question.files.length > 0) expectedParts.push("</file>");
@@ -590,47 +623,27 @@ async function sendQuestion(page, question) {
         if (await promptHasExpectedText(page, expectedParts)) break;
 
         console.log(`>> Prompt text did not stick (attempt ${attempt}/3), retyping...`);
-        await dismissBlockingUI(page);
-        await page.waitForTimeout(500);
+        await dismissAndSettle(page, 500);
     }
 
-    await finalInput.click();
-    await finalInput.focus();
+    await focusComposer(finalInput);
     await dismissBlockingUI(page);
 
     console.log(">> Sending prompt...");
     const sendButton = page.locator(SELECTORS.sendButton).first();
-    if (await sendButton.count() > 0 && await sendButton.isVisible().catch(() => false)) {
-        try {
-            await sendButton.click();
-        } catch {
-            await page.keyboard.press("Enter");
-        }
-    } else {
-        await page.keyboard.press("Enter");
-    }
+    await trySend(page, sendButton, { requireVisible: true });
     await page.waitForTimeout(1500);
 
     const userMessages = page.locator('[data-message-author-role="user"]');
     const userCount = await userMessages.count();
     if (userCount === 0) {
         console.log(">> Send may have failed, retrying...");
-        await dismissBlockingUI(page);
-        await page.waitForTimeout(1000);
-        const retryInput = page.locator(SELECTORS.promptInput).first();
+        await dismissAndSettle(page);
+        const retryInput = promptInput(page);
         if (await retryInput.count() > 0) {
-            await retryInput.click();
-            await retryInput.focus();
+            await focusComposer(retryInput);
         }
-        if (await sendButton.count() > 0) {
-            try {
-                await sendButton.click({ force: true });
-            } catch {
-                await page.keyboard.press("Enter");
-            }
-        } else {
-            await page.keyboard.press("Enter");
-        }
+        await trySend(page, sendButton);
         await page.waitForTimeout(2000);
     }
 
@@ -683,10 +696,10 @@ async function runLoginFlow(page) {
     while (Date.now() - startTime < maxWait) {
         await page.waitForTimeout(2000);
 
-        if (!page.url().includes("/auth/login") && !page.url().includes("/auth/signin")) {
+        if (!isOnAuthPage(page)) {
             await dismissBlockingUI(page);
 
-            const input = page.locator(SELECTORS.promptInput).first();
+            const input = promptInput(page);
             if (await input.count() > 0) {
                 try {
                     await input.waitFor({ state: "visible", timeout: 5000 });
@@ -698,8 +711,7 @@ async function runLoginFlow(page) {
             }
         }
 
-        const currentUrl = page.url();
-        if (currentUrl.includes("/auth/login") || currentUrl.includes("/auth/signin")) {
+        if (isOnAuthPage(page)) {
             const bodyText = await page.evaluate(() => document.body.innerText).catch(() => "");
             if (/welcome back|sign.in|log.in/i.test(bodyText) && !bodyText.includes("#prompt-textarea")) {
                 continue;
