@@ -3,8 +3,16 @@
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
+  "bin": {
+    "askweb": "index.js"
+  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "ask": "node index.js",
+    "new": "node index.js --new",
+    "cont": "node index.js --continue",
+    "forget": "node index.js --clear-conversation",
+    "wipe": "node index.js --clear-conversations"
   },
   "keywords": [],
   "author": "",

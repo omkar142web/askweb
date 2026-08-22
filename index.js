@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 require("dotenv").config({ quiet: true });
 
 const fs = require("fs");
