@@ -4,6 +4,7 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const readline = require("readline");
+const crypto = require("crypto");
 const { chromium } = require("playwright-extra");
 const stealth = require("puppeteer-extra-plugin-stealth")();
 
@@ -20,6 +21,9 @@ const MAX_FILE_CHARS = 150000;
 const DEFAULT_QUESTION = "What is JavaScript?";
 const DEFAULT_OUTPUT_FILE = "./output.md";
 const PREFS_FILE = path.join(__dirname, ".browser-prefs.json");
+const CONVERSATIONS_FILE = path.join(__dirname, ".chatgpt-conversations.json");
+const MAX_SAVED_CONVERSATIONS = 20;
+const CONVERSATION_URL_RE = /\/c\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 const PASTE_FILE_EXTENSIONS = new Set([
     ".css",
     ".csv",
@@ -107,6 +111,8 @@ Arguments:
 Options:
   -o, --output <file>     Save the answer to a file (default: ${DEFAULT_OUTPUT_FILE})
       --login             Open ChatGPT to log in and save the session
+      --continue          Continue the most recent conversation
+      --new               Start a fresh conversation instead of continuing
       --browser           Configure default browser interactively
       --browser-order     Configure browser fallback order
       --browser-reset     Reset browser preferences to automatic
@@ -114,8 +120,16 @@ Options:
   -h, --help              Show this help
   -v, --version           Show version
 
+Conversations:
+  Every run saves its Q&A history locally to .chatgpt-conversations.json.
+  By default each run starts a fresh chat; pass --continue to replay the
+  saved transcript into a new chat so full context carries over (works
+  even when logged out).
+
 Examples:
   node index.js "Explain event loops"
+  node index.js --continue "Give me 3 examples"
+  node index.js --new "Start a fresh discussion about React"
   node index.js "Review this code" src/index.js utils.js
   node index.js "Summarize" @notes.md -o summary.md`);
 }
@@ -127,6 +141,8 @@ function parseCliArgs(argv = process.argv.slice(2)) {
         configureBrowser: false,
         configureBrowserOrder: false,
         resetBrowserPrefs: false,
+        continueLast: false,
+        newConversation: false,
         showHelp: false,
         showVersion: false,
         outputFile: DEFAULT_OUTPUT_FILE,
@@ -148,6 +164,16 @@ function parseCliArgs(argv = process.argv.slice(2)) {
 
         if (arg === "--clear-session") {
             options.clearSession = true;
+            continue;
+        }
+
+        if (arg === "--continue") {
+            options.continueLast = true;
+            continue;
+        }
+
+        if (arg === "--new") {
+            options.newConversation = true;
             continue;
         }
 
@@ -196,6 +222,10 @@ function parseCliArgs(argv = process.argv.slice(2)) {
         }
 
         options.questionArgs.push(arg);
+    }
+
+    if (options.continueLast && options.newConversation) {
+        throw new Error("Use either --continue or --new, not both.");
     }
 
     return options;
@@ -434,21 +464,21 @@ async function trySend(page, sendButton, { requireVisible = false, force = false
     }
 }
 
-async function resetComposer(page) {
+async function resetComposer(page, targetUrl = URL) {
     await dismissBlockingUI(page);
     if (!(await uploadOverlayVisible(page))) return;
 
     console.log(">> Upload overlay still visible, reloading ChatGPT...");
-    await gotoChatGPT(page);
+    await gotoChatGPT(page, targetUrl);
     await page.waitForTimeout(2000);
-    await waitForChatGPTReady(page);
+    await waitForChatGPTReady(page, targetUrl);
 }
 
-async function gotoChatGPT(page) {
+async function gotoChatGPT(page, targetUrl = URL) {
     let lastError;
     for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-            await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+            await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
             return;
         } catch (error) {
             lastError = error;
@@ -476,8 +506,8 @@ async function isPromptReady(page) {
     return !(await modalVisible(page));
 }
 
-async function waitForChatGPTReady(page) {
-    await gotoChatGPT(page);
+async function waitForChatGPTReady(page, targetUrl = URL) {
+    await gotoChatGPT(page, targetUrl);
     await page.waitForTimeout(2000);
 
     const deadline = Date.now() + 5 * 60 * 1000;
@@ -844,8 +874,8 @@ async function promptHasExpectedText(page, expectedParts) {
     return expectedParts.every((part) => typed.includes(part));
 }
 
-async function sendQuestion(page, question) {
-    const input = await waitForChatGPTReady(page);
+async function sendQuestion(page, question, targetUrl = URL) {
+    const input = await waitForChatGPTReady(page, targetUrl);
     markPhase("ready");
     const assistantCountBefore = await page.locator(SELECTORS.assistantMessage).count();
 
@@ -862,7 +892,7 @@ async function sendQuestion(page, question) {
                 await page.waitForTimeout(3000);
             } catch (error) {
                 console.log(`>> Upload failed (${firstLine(error)}), falling back to paste.`);
-                await resetComposer(page);
+                await resetComposer(page, targetUrl);
             }
         }
     }
@@ -1070,6 +1100,80 @@ function wantsClearSession() {
     return CLI.clearSession;
 }
 
+function loadConversations() {
+    try {
+        const data = JSON.parse(fs.readFileSync(CONVERSATIONS_FILE, "utf8"));
+        return Array.isArray(data.conversations) ? data : { conversations: [] };
+    } catch {
+        return { conversations: [] };
+    }
+}
+
+function saveConversations(data) {
+    fs.writeFileSync(CONVERSATIONS_FILE, JSON.stringify(data, null, 2), "utf8");
+}
+
+function latestConversation() {
+    return (
+        loadConversations().conversations.find(
+            (conversation) => Array.isArray(conversation.messages) && conversation.messages.length > 0
+        ) || null
+    );
+}
+
+function buildContinuationPrompt(history, newQuestion) {
+    const transcript = history
+        .map((message) => `${message.role === "assistant" ? "[Assistant]" : "[User]"}: ${message.content}`)
+        .join("\n\n");
+    return [
+        "I am resuming an earlier conversation we had. Here is that conversation verbatim:",
+        "",
+        "--- PREVIOUS CONVERSATION START ---",
+        transcript,
+        "--- PREVIOUS CONVERSATION END ---",
+        "",
+        "Treat everything above as our shared context and remember it.",
+        "",
+        `My new message: ${newQuestion}`,
+    ].join("\n");
+}
+
+async function recordConversation(page, run) {
+    try {
+        let match = page.url().match(CONVERSATION_URL_RE);
+        const deadline = Date.now() + 2000;
+        while (!match && Date.now() < deadline) {
+            await page.waitForTimeout(250);
+            match = page.url().match(CONVERSATION_URL_RE);
+        }
+
+        const title = (await page.title().catch(() => "")).replace(/\s*-\s*ChatGPT\s*$/i, "").trim();
+        const seedMessages = Array.isArray(run.seedMessages) ? run.seedMessages : [];
+        const entry = {
+            id: match ? match[1] : crypto.randomUUID(),
+            url: match ? `${URL}c/${match[1]}` : null,
+            title: title || run.questionText.slice(0, 60),
+            updatedAt: new Date().toISOString(),
+            messages: [
+                ...seedMessages,
+                { role: "user", content: run.questionText },
+                { role: "assistant", content: run.answer },
+            ],
+        };
+
+        const data = loadConversations();
+        data.conversations = [
+            entry,
+            ...data.conversations.filter((conversation) => conversation.id !== entry.id),
+        ].slice(0, MAX_SAVED_CONVERSATIONS);
+        saveConversations(data);
+        return entry;
+    } catch (error) {
+        console.warn(`>> Failed to save conversation history locally: ${firstLine(error)}`);
+        return null;
+    }
+}
+
 function loadBrowserPrefs() {
     try {
         return JSON.parse(fs.readFileSync(PREFS_FILE, "utf8"));
@@ -1238,8 +1342,21 @@ async function main() {
     if (CLI.configureBrowserOrder) return configureBrowserOrder();
     if (CLI.resetBrowserPrefs) return resetBrowserPreferences();
 
+    let targetUrl = URL;
+    let continuing = null;
+    if (!CLI.login && CLI.continueLast) {
+        continuing = latestConversation();
+        if (!continuing) {
+            throw new Error("No saved conversation found. Run a question first, then use --continue.");
+        }
+    }
+
     const loginOnly = wantsLogin();
     const question = loginOnly ? null : loadQuestion();
+    if (question && continuing) {
+        question.originalText = question.text;
+        question.text = buildContinuationPrompt(continuing.messages || [], question.text);
+    }
 
     const context = await launchBrowser();
     markPhase("browser");
@@ -1265,14 +1382,29 @@ async function main() {
             await runLoginFlow(page);
             return;
         }
-        const assistantCountBefore = await sendQuestion(page, question);
+        if (continuing) {
+            console.log(
+                `>> Replaying ${continuing.messages.length} saved message(s) into a fresh chat${continuing.title ? ` ("${continuing.title}")` : ""}`
+            );
+        }
+        const assistantCountBefore = await sendQuestion(page, question, targetUrl);
         const answer = await waitForAnswer(page, assistantCountBefore);
         console.log("\n--- ANSWER ---\n");
         console.log(answer.trim());
         fs.writeFileSync(CLI.outputFile, answer.trim() + "\n", "utf8");
+        const conversation = await recordConversation(page, {
+            questionText: question.originalText ?? question.text,
+            answer: answer.trim(),
+            seedMessages: continuing?.messages || [],
+        });
         markPhase("save");
         printTimings();
         console.log(`\n>> Answer saved to ${CLI.outputFile}`);
+        if (conversation) {
+            console.log(
+                `>> Conversation history saved locally (${conversation.id}, ${conversation.messages.length} messages). Continue with \`node index.js --continue\`.`
+            );
+        }
     } finally {
         await context.close();
     }

@@ -5,3 +5,4 @@ user-data-chrome/
 user-data-edge/
 .env
 .browser-prefs.json
+.chatgpt-conversations.json
