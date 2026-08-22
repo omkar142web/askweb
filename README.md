@@ -71,6 +71,9 @@ node index.js --continue "Follow up question"
 
 # Start a fresh conversation
 node index.js --new "New topic"
+
+# Question text that starts with a dash
+node index.js -- " -explain this flag"
 ```
 
 ## CLI Options
@@ -90,7 +93,7 @@ node index.js --new "New topic"
 | `--clear-conversation <id>` | Delete one saved conversation by id (prefix match supported) |
 | `-h` or `--help` | Show help |
 | `-v` or `--version` | Show version |
-| `--` | Stop option parsing; everything after is the question |
+| `--` | Stop option parsing; everything after is the question. Use `--` before the question to treat leading dashes as literal text. |
 | `<text>` | Question text |
 | `@file` or existing file path | Attach a file |
 
@@ -110,6 +113,9 @@ node index.js --login
 
 # Multi-part question with attachment
 node index.js "Review this code for issues" @src/index.js
+
+# Question text that starts with a dash
+node index.js -- " -explain this flag"
 
 # Pipe question from another command
 echo "Write a hello world in Python" | xargs node index.js
