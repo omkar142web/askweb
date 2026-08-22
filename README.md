@@ -6,12 +6,15 @@ Automate ChatGPT from the command line using a real Chromium-based browser with 
 
 - CLI-driven ChatGPT automation with a persistent browser profile
 - Question submission with retry logic and UI-state validation
-- File attachment support via drag-and-drop, file chooser, or file input fallbacks
-- Multiple browser fallback: Chrome, Brave, Edge
+- File attachment support: text/code files pasted inline, binary files uploaded
+- Multiple browser fallback: Chrome, Brave, Edge (configurable order)
 - Login flow with session persistence across runs
+- Conversation history with `--continue` and `--new` flags
 - Output saved to Markdown by default
 - Automatic dismissal of login prompts, popups, and blocking dialogs
 - Browser preference persistence (`.browser-prefs.json`)
+- Conversation history persistence (`.chatgpt-conversations.json`, max 20 entries)
+- Graceful shutdown on SIGINT/SIGTERM
 
 ## Tech Stack
 
@@ -47,28 +50,41 @@ node index.js "What is JavaScript?"
 # Ask with output to a specific file
 node index.js -o result.md "Explain quantum computing"
 
-# Attach a file
+# Attach a text/code file (pasted inline)
 node index.js "Summarize this file" @notes.txt
 
 # Attach multiple files
 node index.js "Compare these files" file1.json file2.tsx
+
+# Continue the most recent conversation
+node index.js --continue "Follow up question"
+
+# Start a fresh conversation
+node index.js --new "New topic"
 ```
 
 ## CLI Options
 
 | Option | Description |
 |---|---|
-| `node index.js <question>` | Send a question to ChatGPT |
-| `--login` | Open browser to log in and save session |
-| `--clear-session` | Wipe saved local storage before launching |
+| `node index.js [options] [question] [files...]` | Ask ChatGPT a question |
+| `-o <path>` or `--output <path>` | Save answer to a file (default: `./output.md`) |
+| `--login` | Open browser to log in and save session (up to 10 min) |
+| `--continue` | Continue the most recent conversation |
+| `--new` | Start a fresh conversation (default) |
 | `--browser` | Set default browser interactively |
 | `--browser-order` | Set browser fallback order |
-| `--browser-reset` | Reset browser preferences |
-| `-o <path>` or `--output <path>` | Save answer to a file |
+| `--browser-reset` | Reset browser preferences to automatic |
+| `--clear-session` | Wipe saved local storage before launching |
+| `--clear-conversations` | Delete all saved conversation history |
+| `--clear-conversation <id>` | Delete one saved conversation by id (prefix match supported) |
+| `-h` or `--help` | Show help |
+| `-v` or `--version` | Show version |
 | `--` | Stop option parsing; everything after is the question |
 | `<text>` | Question text |
 | `@file` or existing file path | Attach a file |
-| `file.js`, `file.json`, etc. | Attach a file by path |
+
+**Note:** `--continue` and `--new` cannot be used together.
 
 ### Examples
 
@@ -87,27 +103,62 @@ node index.js "Review this code for issues" @src/index.js
 
 # Pipe question from another command
 echo "Write a hello world in Python" | xargs node index.js
+
+# Delete all conversation history
+node index.js --clear-conversations
+
+# Delete a specific conversation by id prefix
+node index.js --clear-conversation abc123
 ```
 
 ## File Attachments
 
-Supported upload methods (tried in order):
+### Text and Code Files
 
-1. `input[type="file"]`
-2. File chooser button
-3. Drag-and-drop
-
-Files with these extensions are pasted as text instead of uploaded:
+Files with these extensions are pasted inline into the prompt as fenced code blocks:
 
 `.css`, `.csv`, `.html`, `.js`, `.json`, `.jsx`, `.md`, `.py`, `.ts`, `.tsx`, `.txt`, `.xml`, `.yaml`, `.yml`
 
 Large files are truncated to 150,000 characters.
 
+Text attachments are wrapped in `<file name="..." lang="...">` blocks with the file contents in a fenced code block.
+
+### Binary Files
+
+Non-text files are uploaded via the browser. Binary attachments are encoded as base64 in `<file name="..." encoding="base64">` blocks with an automatic decode note appended to the prompt.
+
+### Upload Methods
+
+For binary uploads, the following strategies are tried in order:
+
+1. `input[type="file"]` (tries inputs from last to first)
+2. File chooser button (`[data-testid="composer-plus-btn"]`) with menu fallback
+3. Drag-and-drop on `#prompt-textarea` (programmatic `DragEvent` dispatch)
+
+## Conversation History
+
+Conversation history is saved to `.chatgpt-conversations.json` at the project root. Up to 20 conversations are retained.
+
+Each entry stores:
+- `id` (from URL UUID or generated)
+- `url`
+- `title`
+- `updatedAt`
+- `messages[]`
+
+Use `--continue` to replay the most recent conversation's full transcript into a fresh chat. Use `--new` to explicitly start a fresh conversation without history.
+
+Manage history with:
+- `--clear-conversations` — delete all saved conversations
+- `--clear-conversation <id>` — delete one conversation by id (prefix match supported)
+
 ## Output
 
 Answers are saved to `./output.md` by default. Use `-o` to change the path.
 
-The tool attempts to capture Markdown via the copy button. If unavailable, it falls back to rendered text.
+The tool attempts to capture Markdown via the copy button (`[data-testid="copy-turn-action-button"]`) and reads it from the clipboard. If unavailable, it falls back to `button[aria-label*="copy" i]`, then to `answer.innerText()`.
+
+The tool grants `clipboard-read` and `clipboard-write` permissions to the browser context for reliable extraction.
 
 ## Browser Profiles
 
@@ -118,6 +169,8 @@ Persistent profiles are stored in:
 - `./user-data-edge` (Edge)
 
 These directories contain cookies, localStorage, and session state and are **not** tracked in version control.
+
+Profile directories are cleaned on exit by setting `exit_type=Normal` and `exited_cleanly=true` in `Default/Preferences`.
 
 ## Configuration
 
@@ -138,13 +191,16 @@ node index.js --browser-order
 node index.js --browser-reset
 ```
 
+The configured preferred browser is tried first, followed by the saved order, then any remaining defaults.
+
 ## Known Issues
 
 - Brave executable path is hardcoded for Windows in `index.js`:
   - `executablePath: ${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`
-  - On macOS/Linux, `LOCALAPPDATA` is undefined and Brave may be skipped.
-- Markdown extraction via `innerText()` may lose original formatting. See `output.md` for discussion.
+  - On macOS/Linux, `LOCALAPPDATA` is undefined and Brave may be skipped silently.
+- Markdown extraction via `innerText()` may lose original formatting.
 - Some ChatGPT UI changes may require selector updates in `index.js`.
+- Maximum of 20 saved conversations in `.chatgpt-conversations.json`.
 
 ## Troubleshooting
 
@@ -163,6 +219,10 @@ node index.js --browser-reset
 # Answer contains no Markdown formatting
 # - The copy button may be unavailable
 # - Re-run; the tool falls back to rendered text
+
+# Conversation history not saving
+# - Ensure the project directory is writable
+# - Check that .chatgpt-conversations.json is not locked by another process
 ```
 
 ## License
