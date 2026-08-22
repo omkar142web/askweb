@@ -3,6 +3,7 @@ require("dotenv").config({ quiet: true });
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const readline = require("readline");
 const { chromium } = require("playwright-extra");
 const stealth = require("puppeteer-extra-plugin-stealth")();
 
@@ -18,6 +19,7 @@ const STABLE_POLLS_REQUIRED = 3;
 const MAX_FILE_CHARS = 150000;
 const DEFAULT_QUESTION = "What is JavaScript?";
 const DEFAULT_OUTPUT_FILE = "./output.md";
+const PREFS_FILE = path.join(__dirname, ".browser-prefs.json");
 const PASTE_FILE_EXTENSIONS = new Set([
     ".css",
     ".csv",
@@ -74,6 +76,9 @@ function parseCliArgs(argv = process.argv.slice(2)) {
     const options = {
         login: false,
         clearSession: false,
+        configureBrowser: false,
+        configureBrowserOrder: false,
+        resetBrowserPrefs: false,
         outputFile: DEFAULT_OUTPUT_FILE,
         questionArgs: [],
     };
@@ -93,6 +98,21 @@ function parseCliArgs(argv = process.argv.slice(2)) {
 
         if (arg === "--clear-session") {
             options.clearSession = true;
+            continue;
+        }
+
+        if (arg === "--browser") {
+            options.configureBrowser = true;
+            continue;
+        }
+
+        if (arg === "--browser-order") {
+            options.configureBrowserOrder = true;
+            continue;
+        }
+
+        if (arg === "--browser-reset") {
+            options.resetBrowserPrefs = true;
             continue;
         }
 
@@ -797,9 +817,130 @@ function wantsClearSession() {
     return CLI.clearSession;
 }
 
+function loadBrowserPrefs() {
+    try {
+        return JSON.parse(fs.readFileSync(PREFS_FILE, "utf8"));
+    } catch {
+        return {};
+    }
+}
+
+function saveBrowserPrefs(prefs) {
+    fs.writeFileSync(PREFS_FILE, JSON.stringify(prefs, null, 2), "utf8");
+}
+
+function browserLabel(browser) {
+    return browser.name.charAt(0).toUpperCase() + browser.name.slice(1);
+}
+
+function browserByName(name) {
+    return BROWSERS.find((browser) => browser.name === name);
+}
+
+function availabilityHint(browser) {
+    return browser.executablePath && !fs.existsSync(browser.executablePath) ? " (not found on this machine)" : "";
+}
+
+function orderedBrowsers() {
+    const prefs = loadBrowserPrefs();
+    const savedOrder = Array.isArray(prefs.browserOrder)
+        ? prefs.browserOrder.map(browserByName).filter(Boolean)
+        : [];
+    const seen = new Set(savedOrder.map((browser) => browser.name));
+    const list = [...savedOrder, ...BROWSERS.filter((browser) => !seen.has(browser.name))];
+
+    const preferred = prefs.defaultBrowser ? browserByName(prefs.defaultBrowser) : null;
+    if (preferred) {
+        return [preferred, ...list.filter((browser) => browser !== preferred)];
+    }
+    return list;
+}
+
+function promptUser(promptText) {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    return new Promise((resolve) => {
+        rl.question(promptText, (answer) => {
+            rl.close();
+            resolve(answer.trim());
+        });
+    });
+}
+
+async function configureDefaultBrowser() {
+    const prefs = loadBrowserPrefs();
+
+    console.log("\nBrowser configuration\n");
+    console.log(
+        `Current default: ${
+            prefs.defaultBrowser && browserByName(prefs.defaultBrowser)
+                ? browserLabel(browserByName(prefs.defaultBrowser))
+                : `${browserLabel(BROWSERS[0])} (automatic)`
+        }\n`
+    );
+    BROWSERS.forEach((browser, index) => {
+        console.log(`${index + 1}. ${browserLabel(browser)}${availabilityHint(browser)}`);
+    });
+
+    const answer = await promptUser("\nEnter number to change default (Enter keeps current): ");
+    if (!answer) {
+        console.log(">> Default unchanged.");
+        return;
+    }
+
+    if (!/^\d+$/.test(answer) || Number(answer) < 1 || Number(answer) > BROWSERS.length) {
+        console.log(">> Invalid selection, default unchanged.");
+        return;
+    }
+
+    const chosen = BROWSERS[Number(answer) - 1];
+    prefs.defaultBrowser = chosen.name;
+    saveBrowserPrefs(prefs);
+    console.log(`\n✓ Default browser changed to ${browserLabel(chosen)}.`);
+}
+
+async function configureBrowserOrder() {
+    const prefs = loadBrowserPrefs();
+    const current = orderedBrowsers();
+
+    console.log("\nCurrent order:");
+    current.forEach((browser, index) => {
+        console.log(`${index + 1}. ${browserLabel(browser)}${availabilityHint(browser)}`);
+    });
+
+    const answer = await promptUser("\nEnter new order (e.g. 2,1,3): ");
+    const indices = answer
+        .split(",")
+        .map((part) => Number(part.trim()))
+        .filter((n) => Number.isInteger(n));
+
+    const isValid =
+        indices.length === BROWSERS.length &&
+        new Set(indices).size === BROWSERS.length &&
+        indices.every((n) => n >= 1 && n <= BROWSERS.length);
+
+    if (!isValid) {
+        console.log(`>> Invalid order (need a permutation of 1-${BROWSERS.length}), unchanged.`);
+        return;
+    }
+
+    prefs.browserOrder = indices.map((n) => BROWSERS[n - 1].name);
+    saveBrowserPrefs(prefs);
+    console.log(
+        `\n✓ Browser order updated: ${prefs.browserOrder.map((name) => browserLabel(browserByName(name))).join(", ")}.`
+    );
+}
+
+function resetBrowserPreferences() {
+    try {
+        fs.unlinkSync(PREFS_FILE);
+    } catch {}
+    console.log("✓ Browser preferences reset to automatic (Chrome first).");
+}
+
 async function launchBrowser() {
+    const browsersToTry = orderedBrowsers();
     let lastError;
-    for (const browser of BROWSERS) {
+    for (const browser of browsersToTry) {
         if (browser.executablePath && !fs.existsSync(browser.executablePath)) continue;
         markProfileClean(browser.profileDir);
         if (wantsClearSession()) {
@@ -826,7 +967,7 @@ async function launchBrowser() {
             lastError = error;
         }
     }
-    throw new Error(`No browser could be launched (tried: ${BROWSERS.map((b) => b.name).join(", ")}). ${lastError?.message || ""}`);
+    throw new Error(`No browser could be launched (tried: ${browsersToTry.map((b) => b.name).join(", ")}). ${lastError?.message || ""}`);
 }
 
 function loadQuestion() {
@@ -836,6 +977,10 @@ function loadQuestion() {
 }
 
 async function main() {
+    if (CLI.configureBrowser) return configureDefaultBrowser();
+    if (CLI.configureBrowserOrder) return configureBrowserOrder();
+    if (CLI.resetBrowserPrefs) return resetBrowserPreferences();
+
     const loginOnly = wantsLogin();
     const question = loginOnly ? null : loadQuestion();
 

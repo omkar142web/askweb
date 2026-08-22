@@ -4,3 +4,4 @@ user-data-brave/
 user-data-chrome/
 user-data-edge/
 .env
+.browser-prefs.json
