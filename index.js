@@ -41,6 +41,7 @@ const SELECTORS = {
     stopButton: '[data-testid="stop-button"]',
     assistantMessage: '[data-message-author-role="assistant"]',
     attachButton: '[data-testid="composer-plus-btn"]',
+    copyButton: '[data-testid="copy-turn-action-button"]',
 };
 
 const promptInput = (page) => page.locator(SELECTORS.promptInput).first();
@@ -650,6 +651,45 @@ async function sendQuestion(page, question) {
     return assistantCountBefore;
 }
 
+async function findCopyButton(page, answer) {
+    const parent = answer.locator("xpath=..");
+    const tiers = [
+        SELECTORS.copyButton,
+        'button[aria-label*="copy" i]:not([aria-label*="code" i]):not([aria-label*="image" i])',
+    ];
+    for (const selector of tiers) {
+        for (const scope of [answer, parent, page]) {
+            const button = scope.locator(selector).last();
+            if ((await button.count()) > 0 && (await button.isVisible().catch(() => false))) {
+                return button;
+            }
+        }
+    }
+    return null;
+}
+
+async function extractAnswerMarkdown(page, answer) {
+    await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => {});
+
+    const copyButton = await findCopyButton(page, answer);
+    if (!copyButton) return null;
+
+    await answer.hover({ timeout: 2000 }).catch(() => {});
+    try {
+        await copyButton.click({ timeout: 5000 });
+    } catch {
+        try {
+            await copyButton.click({ timeout: 3000, force: true });
+        } catch {
+            return null;
+        }
+    }
+
+    await page.waitForTimeout(400);
+    const text = await page.evaluate(() => navigator.clipboard.readText()).catch(() => "");
+    return typeof text === "string" && text.trim() ? text : null;
+}
+
 async function waitForAnswer(page, assistantCountBefore = 0) {
     const replies = page.locator(SELECTORS.assistantMessage);
     await page.waitForFunction(
@@ -682,6 +722,12 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
         prevLength = lastLength;
     }
 
+    const markdown = await extractAnswerMarkdown(page, answer);
+    if (markdown) {
+        console.log(">> Raw Markdown captured via copy button.");
+        return markdown;
+    }
+    console.log(">> Copy button unavailable, falling back to rendered text.");
     return answer.innerText();
 }
 
@@ -794,6 +840,7 @@ async function main() {
     const question = loginOnly ? null : loadQuestion();
 
     const context = await launchBrowser();
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]).catch(() => {});
     let shuttingDown = false;
     const shutdown = async () => {
         if (shuttingDown) return;
