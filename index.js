@@ -109,6 +109,7 @@ pasted inline, other files are uploaded.
 Arguments:
   question                Question text (default: "${DEFAULT_QUESTION}")
   files...                Files to attach; "@path" also references a file
+  Use "--" before the question to treat leading dashes as literal text.
 
 Options:
   -o, --output <file>     Save the answer to a file (default: ${DEFAULT_OUTPUT_FILE})
