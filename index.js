@@ -12,10 +12,11 @@ const stealth = require("puppeteer-extra-plugin-stealth")();
 
 const URL = "https://chatgpt.com/";
 const LOGIN_URL = "https://chatgpt.com/auth/login";
+const APP_DIR = __dirname;
 const BROWSERS = [
-    { name: "chrome", channel: "chrome", profileDir: "./user-data-chrome" },
-    { name: "brave", executablePath: `${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`, profileDir: "./user-data-brave" },
-    { name: "edge", channel: "msedge", profileDir: "./user-data-edge" },
+    { name: "chrome", channel: "chrome", profileDir: path.join(APP_DIR, "user-data-chrome") },
+    { name: "brave", executablePath: `${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`, profileDir: path.join(APP_DIR, "user-data-brave") },
+    { name: "edge", channel: "msedge", profileDir: path.join(APP_DIR, "user-data-edge") },
 ];
 const POLL_MS = 1000;
 const STABLE_POLLS_REQUIRED = 3;
@@ -538,9 +539,16 @@ async function waitForChatGPTReady(page, targetUrl = URL) {
     await page.waitForTimeout(2000);
 
     const deadline = Date.now() + 5 * 60 * 1000;
+    let lastNotice = 0;
     while (Date.now() < deadline) {
         await dismissBlockingUI(page);
         if (await isPromptReady(page)) break;
+
+        if (isOnAuthPage(page) && Date.now() - lastNotice > 15000) {
+            lastNotice = Date.now();
+            const elapsed = Math.round((Date.now() - (deadline - 5 * 60 * 1000)) / 1000);
+            console.log(`>> Waiting for login... (${elapsed}s) Not logged in in this browser profile. Log in inside the window, or run \`askweb --login\`.`);
+        }
         await page.waitForTimeout(1000);
     }
 
