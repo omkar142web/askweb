@@ -202,11 +202,13 @@ function loadFiles(fileRefs) {
             throw new Error(`File not found: ${fullPath}`);
         }
 
-        let content = fs.readFileSync(fullPath, "utf8");
+        const isText = PASTE_FILE_EXTENSIONS.has(path.extname(fullPath).toLowerCase());
+        const buffer = fs.readFileSync(fullPath);
+        let content = isText ? buffer.toString("utf8") : buffer.toString("base64");
         const truncated = content.length > MAX_FILE_CHARS;
         if (truncated) content = content.slice(0, MAX_FILE_CHARS);
 
-        return { name: path.basename(fullPath), fullPath, content, truncated };
+        return { name: path.basename(fullPath), fullPath, isText, content, truncated };
     });
 }
 
@@ -214,13 +216,25 @@ function shouldPasteFiles(files) {
     return files.some((file) => PASTE_FILE_EXTENSIONS.has(path.extname(file.name).toLowerCase()));
 }
 
-function fileBlock(file) {
-    const encoded = Buffer.from(file.content, "utf8").toString("base64");
-    const truncationNote = file.truncated ? `\n(${file.name} was truncated to ${MAX_FILE_CHARS} chars)` : "";
-    return `\n\n<file name="${file.name}" encoding="base64">\n${encoded}\n</file>${truncationNote}`;
+function codeFenceFor(content) {
+    let longest = 0;
+    for (const match of content.match(/`+/g) || []) {
+        longest = Math.max(longest, match.length);
+    }
+    return "`".repeat(Math.max(3, longest + 1));
 }
 
-const DECODE_NOTE = "\n\nThe file contents above are base64-encoded UTF-8. Decode each file before analyzing it.";
+function fileBlock(file) {
+    const truncationNote = file.truncated ? `\n(${file.name} was truncated to ${MAX_FILE_CHARS} chars)` : "";
+    if (!file.isText) {
+        return `\n\n<file name="${file.name}" encoding="base64">\n${file.content}\n</file>${truncationNote}`;
+    }
+    const lang = path.extname(file.name).slice(1);
+    const fence = codeFenceFor(file.content);
+    return `\n\n<file name="${file.name}" lang="${lang}">\n${fence}${lang}\n${file.content}\n${fence}\n</file>${truncationNote}`;
+}
+
+const DECODE_NOTE = '\n\nAny <file> block with encoding="base64" contains base64-encoded bytes. Decode those blocks before analyzing them.';
 
 const NO_AUTH_MODAL = '[data-testid="modal-no-auth-login"]';
 const UPLOAD_OVERLAY_TEXT = /add\s+anything/i;
@@ -579,21 +593,64 @@ async function attachFiles(page, files) {
 }
 
 function buildFullPrompt(question) {
-    const blocks = question.files.map(fileBlock).join("") + DECODE_NOTE;
-    return question.text ? `${question.text}\n${blocks}` : blocks;
+    const blocks = question.files.map(fileBlock).join("");
+    const hasBinary = question.files.some((file) => !file.isText);
+    const body = hasBinary ? blocks + DECODE_NOTE : blocks;
+    return question.text ? `${question.text}\n${body}` : body;
+}
+
+async function injectViaDom(page, text) {
+    return page
+        .evaluate(
+            ({ selector, text }) => {
+                const el = document.querySelector(selector);
+                if (!el) return false;
+
+                if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
+                    const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                    Object.getOwnPropertyDescriptor(proto, "value").set.call(el, text);
+                    el.dispatchEvent(new Event("input", { bubbles: true }));
+                    return true;
+                }
+
+                el.focus();
+                const selection = window.getSelection();
+                selection.removeAllRanges();
+                const range = document.createRange();
+                range.selectNodeContents(el);
+                selection.addRange(range);
+                return document.execCommand("insertText", false, text);
+            },
+            { selector: SELECTORS.promptInput, text }
+        )
+        .then((ok) => !!ok)
+        .catch(() => false);
+}
+
+async function pasteIntoComposer(page, text) {
+    if (await injectViaDom(page, text)) {
+        console.log(`>> Pasted ${(text.length / 1024).toFixed(1)} KB via DOM injection.`);
+        return;
+    }
+
+    console.log(`>> DOM injection unavailable, pasting ${(text.length / 1024).toFixed(1)} KB in chunks via insertText...`);
+    const CHUNK = 2000;
+    for (let offset = 0; offset < text.length; offset += CHUNK) {
+        await page.keyboard.insertText(text.slice(offset, offset + CHUNK));
+        await page.waitForTimeout(40);
+    }
 }
 
 async function typePrompt(page, input, question, attached) {
     await dismissBlockingUI(page);
 
+    const pasteFiles = !attached && question.files.length > 0;
     await focusComposer(input);
     await input.fill("");
 
-    const pasteFiles = !attached && question.files.length > 0;
-    if (pasteFiles) {
-        await page.keyboard.insertText(buildFullPrompt(question));
-    } else if (question.text) {
-        await input.fill(question.text);
+    const payload = pasteFiles ? buildFullPrompt(question) : question.text;
+    if (payload) {
+        await pasteIntoComposer(page, payload);
     }
 
     await page.waitForTimeout(pasteFiles ? 1500 : 800);
@@ -964,6 +1021,7 @@ async function launchBrowser() {
             console.log(`>> Browser: ${browser.name} (profile: ${browser.profileDir})`);
             return context;
         } catch (error) {
+            console.log(`>> ${browser.name} failed to launch (${firstLine(error)}), trying next browser...`);
             lastError = error;
         }
     }
