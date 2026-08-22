@@ -1,4 +1,4 @@
-# scraping-chatgpt
+# askweb
 
 Automate ChatGPT from the command line using a real Chromium-based browser with Playwright. Send questions, attach files, and save responses as Markdown.
 
@@ -23,22 +23,32 @@ Automate ChatGPT from the command line using a real Chromium-based browser with 
 - **Stealth:** `puppeteer-extra-plugin-stealth`
 - **Config:** `dotenv`
 
-## Prerequisites
-
-- Node.js 16+
-- A Chromium-based browser installed:
-  - Google Chrome (channel: `chrome`)
-  - Microsoft Edge (channel: `msedge`)
-  - Brave Browser (executable path auto-detected on Windows)
-- A ChatGPT account for logged-in usage
-
 ## Installation
 
 ```bash
 git clone <your-repo-url>
-cd scraping-chatgpt
+cd askweb
 npm install
 npx playwright install chromium
+```
+
+### Global CLI
+
+`package.json` exposes a `bin` entry, so after installing you can also use:
+
+```bash
+npm install -g .
+askweb "What is JavaScript?"
+```
+
+### npm Script Shortcuts
+
+```bash
+npm run ask   "What is JavaScript?"
+npm run new   "New topic"
+npm run cont  "Follow up question"
+npm run forget <conversation-id>
+npm run wipe
 ```
 
 ## Quick Start
