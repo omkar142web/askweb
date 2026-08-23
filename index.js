@@ -20,7 +20,11 @@ const BROWSERS = [
 ];
 const POLL_MS = 1000;
 const STABLE_POLLS_REQUIRED = 3;
-const MAX_FILE_CHARS = 150000;
+const MAX_FILE_CHARS = 400000;
+const SINGLE_PASTE_MAX = 25000;
+const PAYLOAD_CHUNK_SIZE = Number(process.env.ASKWEB_CHUNK_SIZE) || 18000;
+const ANON_MAX_PARTS = 3;
+const ANON_PART_SIZE_CEILING = 27000;
 const DEFAULT_QUESTION = "What is JavaScript?";
 const DEFAULT_OUTPUT_FILE = "./output.md";
 const PREFS_FILE = path.join(__dirname, ".browser-prefs.json");
@@ -43,6 +47,281 @@ const PASTE_FILE_EXTENSIONS = new Set([
     ".yaml",
     ".yml",
 ]);
+const PROMPTS_FILE = path.join(__dirname, ".askweb-prompts.json");
+const PROMPT_NAME_RE = /^[-a-z0-9_]+$/i;
+const RESERVED_PROMPT_FLAGS = new Set([
+    "o", "output", "login", "continue", "new", "browser", "browser-order", "browser-reset",
+    "clear-session", "clear-conversations", "clear-conversation", "help", "h", "version", "v",
+    "prompts", "prompt-create",
+]);
+
+const BUILTIN_PROMPTS = {
+    "find-error":
+        "You are a meticulous code reviewer. Find every bug, logic error, race condition, or edge-case failure in the attached code. For each issue give: file, location (function/line), severity (critical/major/minor), why it is wrong, and a minimal concrete fix as a diff-style snippet. End with a prioritized summary. Do not pad the report with non-issues.",
+    review:
+        "Review the attached code like a senior engineer: correctness, readability, naming, structure, error handling, and performance. Point out concrete improvements with short before/after snippets, and call out anything done well. Keep it actionable.",
+    refactor:
+        "Propose refactoring(s) for the attached code that improve clarity and maintainability WITHOUT changing behavior. Show each refactor as a focused before/after snippet with a one-line rationale. Rank by impact-to-risk ratio.",
+    tests:
+        "Write thorough unit tests for the attached code. Cover happy paths, edge cases, and failure modes. Use the language's standard/batteries-included test style already implied by the project, and note any behavior you found ambiguous while writing them.",
+    summarize:
+        "Summarize the attached material: purpose, key points, structure/outline, and anything surprising or noteworthy. Be concise but complete.",
+    explain:
+        "Explain {{input}} clearly, with concrete examples and a short mental model I can remember.",
+    teach:
+        "Teach me {{input}} from scratch: prerequisites, core concepts in a logical order, worked examples, common misconceptions, and a short exercise set with answers hidden at the end.",
+    generate:
+        "Write complete, production-quality code for this task:\n\n{{input}}\n\nRequirements: clean structure, meaningful names, inline error handling, and a brief usage example. Return only the code and the example.",
+};
+
+function isValidPromptName(name) {
+    return PROMPT_NAME_RE.test(name);
+}
+
+function isConflictingPromptName(name) {
+    return RESERVED_PROMPT_FLAGS.has(name);
+}
+
+function promptNameConflictWarning(name) {
+    return `Warning: "--${name}" is already a real option, so the flag will always run that option - this preset would not be reachable as a command.`;
+}
+
+function normalizePromptEntry(entry) {
+    let prompt;
+    let description = "";
+    let declaredArguments = null;
+    if (typeof entry === "string") {
+        prompt = entry;
+    } else if (entry && typeof entry === "object" && typeof entry.prompt === "string") {
+        prompt = entry.prompt;
+        description = String(entry.description || "").trim();
+        declaredArguments = typeof entry.arguments === "boolean" ? entry.arguments : null;
+    } else {
+        return null;
+    }
+    prompt = prompt.trim();
+    if (!prompt) return null;
+    const detected = /\{\{\s*input\s*\}\}/.test(prompt);
+    return {
+        prompt,
+        description,
+        arguments: declaredArguments === null ? detected : declaredArguments,
+    };
+}
+
+function readUserPrompts() {
+    try {
+        const data = JSON.parse(fs.readFileSync(PROMPTS_FILE, "utf8"));
+        if (!data || typeof data !== "object" || Array.isArray(data)) return {};
+        const cleaned = {};
+        for (const [name, entry] of Object.entries(data)) {
+            const key = name.toLowerCase();
+            if (!isValidPromptName(key)) continue;
+            const normalized = normalizePromptEntry(entry);
+            if (normalized) cleaned[key] = normalized;
+        }
+        return cleaned;
+    } catch {
+        return {};
+    }
+}
+
+function saveUserPrompts(entries) {
+    fs.writeFileSync(PROMPTS_FILE, JSON.stringify(entries, null, 2), "utf8");
+}
+
+function loadPromptRegistry() {
+    const registry = new Map();
+    for (const [name, template] of Object.entries(BUILTIN_PROMPTS)) {
+        registry.set(name, { ...normalizePromptEntry(template), builtin: true });
+    }
+    for (const [name, entry] of Object.entries(readUserPrompts())) {
+        registry.set(name, { ...entry, builtin: false });
+    }
+    return registry;
+}
+
+function promptPreview(entry, width = 64) {
+    const base = entry.description || entry.prompt.replace(/\s+/g, " ");
+    return base.length > width ? `${base.slice(0, width - 3)}...` : base;
+}
+
+function printPromptList(registry) {
+    const customs = [...registry.values()].filter((p) => !p.builtin).length;
+    console.log(`\nPrompt Manager (${registry.size} prompts, ${customs} custom)\n`);
+    for (const [name, entry] of registry) {
+        const tag = entry.builtin ? "" : "  *";
+        console.log(`  ${name.padEnd(16)} ${promptPreview(entry)}${tag}`);
+    }
+    console.log("");
+}
+
+async function promptMultiline(label) {
+    console.log(`${label} (finish with an empty line):`);
+    const lines = [];
+    while (true) {
+        const line = await promptUser("> ");
+        if (!line) break;
+        lines.push(line);
+    }
+    return lines.join("\n");
+}
+
+async function askExistingPromptName(action) {
+    const registry = loadPromptRegistry();
+    const name = (await promptUser(`Prompt name to ${action}: `)).trim().toLowerCase();
+    if (!registry.has(name)) {
+        console.log(`>> No prompt named "${name}".`);
+        return null;
+    }
+    return name;
+}
+
+async function createPromptFlow(nameArg = "") {
+    console.log("\nCreate a prompt preset\n");
+
+    let name = (nameArg || (await promptUser("Prompt name: "))).trim().toLowerCase();
+    if (!isValidPromptName(name)) {
+        console.log(`>> Invalid name "${name}". Use letters, digits, - or _ only.`);
+        return;
+    }
+    if (isConflictingPromptName(name)) {
+        const proceed = (
+            await promptUser(`${promptNameConflictWarning(name)} Save anyway? (y/N): `)
+        ).toLowerCase();
+        if (proceed !== "y") {
+            console.log(">> Cancelled.");
+            return;
+        }
+    }
+
+    const userEntries = readUserPrompts();
+    const exists = loadPromptRegistry().has(name);
+    if (exists) {
+        const overwrite = (await promptUser(`"${name}" already exists. Overwrite? (y/N): `)).toLowerCase();
+        if (overwrite !== "y") {
+            console.log(">> Cancelled.");
+            return;
+        }
+    }
+
+    const description = (await promptUser("Short description (optional): ")).trim();
+    const prompt = await promptMultiline("Prompt");
+    if (!prompt.trim()) {
+        console.log(">> Empty prompt, cancelled.");
+        return;
+    }
+
+    userEntries[name] = { prompt, description };
+    saveUserPrompts(userEntries);
+
+    const normalized = normalizePromptEntry(userEntries[name]);
+    console.log(
+        `\n\u2713 Saved "${name}"${normalized.arguments ? " (arguments enabled via {{input}})" : ""}.` +
+            `\n  Run it:   node index.js --${name}${normalized.arguments ? ' "your input"' : ""}` +
+            `\n  Manage:   node index.js --prompts`
+    );
+}
+
+async function runPromptManager() {
+    while (true) {
+        const registry = loadPromptRegistry();
+        printPromptList(registry);
+        const choice = (await promptUser("[a] Add  [e] Edit  [r] Rename  [d] Delete  [v] View  [q] Quit > ")).toLowerCase();
+
+        try {
+            if (choice.startsWith("q")) break;
+
+            if (choice.startsWith("a")) {
+                await createPromptFlow();
+                continue;
+            }
+
+            if (choice.startsWith("v")) {
+                const name = await askExistingPromptName("view");
+                if (name) {
+                    const entry = loadPromptRegistry().get(name);
+                    console.log(`\n--- ${name} ${entry.arguments ? "(takes {{input}})" : ""} ---\n${entry.prompt}\n`);
+                }
+                continue;
+            }
+
+            if (choice.startsWith("e")) {
+                const name = await askExistingPromptName("edit");
+                if (!name) continue;
+                const current = loadPromptRegistry().get(name);
+                console.log(`\nCurrent prompt for "${name}":\n${current.prompt}\n`);
+                const replacement = await promptMultiline("New prompt (empty line cancels)");
+                if (!replacement.trim()) {
+                    console.log(">> Unchanged.");
+                    continue;
+                }
+                const userEntries = readUserPrompts();
+                userEntries[name] = { prompt: replacement, description: current.description };
+                saveUserPrompts(userEntries);
+                console.log(`\u2713 Updated "${name}".`);
+                continue;
+            }
+
+            if (choice.startsWith("r")) {
+                const name = await askExistingPromptName("rename");
+                if (!name) continue;
+                const newName = (await promptUser("New name: ")).trim().toLowerCase();
+                if (!isValidPromptName(newName)) {
+                    console.log(`>> Invalid name "${newName}". Use letters, digits, - or _ only.`);
+                    continue;
+                }
+                if (isConflictingPromptName(newName)) {
+                    const proceed = (
+                        await promptUser(`${promptNameConflictWarning(newName)} Continue? (y/N): `)
+                    ).toLowerCase();
+                    if (proceed !== "y") {
+                        console.log(">> Cancelled.");
+                        continue;
+                    }
+                }
+                if (loadPromptRegistry().has(newName)) {
+                    console.log(`>> "${newName}" already exists.`);
+                    continue;
+                }
+                const userEntries = readUserPrompts();
+                if (Object.prototype.hasOwnProperty.call(userEntries, name)) {
+                    userEntries[newName] = userEntries[name];
+                    delete userEntries[name];
+                    saveUserPrompts(userEntries);
+                    console.log(`\u2713 Renamed "${name}" to "${newName}".`);
+                } else {
+                    userEntries[newName] = { prompt: loadPromptRegistry().get(name).prompt };
+                    saveUserPrompts(userEntries);
+                    console.log(`\u2713 Copied built-in "${name}" to "${newName}" (built-ins stay available).`);
+                }
+                continue;
+            }
+
+            if (choice.startsWith("d")) {
+                const name = await askExistingPromptName("delete");
+                if (!name) continue;
+                const userEntries = readUserPrompts();
+                if (!Object.prototype.hasOwnProperty.call(userEntries, name)) {
+                    console.log(`>> "${name}" is a built-in prompt and cannot be deleted. Override it with the same name instead.`);
+                    continue;
+                }
+                const confirm = (await promptUser(`Delete "${name}"? (y/N): `)).toLowerCase();
+                if (confirm !== "y") {
+                    console.log(">> Cancelled.");
+                    continue;
+                }
+                delete userEntries[name];
+                saveUserPrompts(userEntries);
+                console.log(`\u2713 Deleted "${name}".`);
+                continue;
+            }
+        } catch (error) {
+            console.log(`>> ${firstLine(error)}`);
+        }
+    }
+    console.log(">> Prompt Manager closed.");
+}
 
 const SELECTORS = {
     promptInput: "#prompt-textarea",
@@ -119,6 +398,9 @@ Options:
       --login             Open ChatGPT to log in and save the session
       --continue          Continue the most recent conversation
       --new               Start a fresh conversation instead of continuing
+      --prompts           Open the Prompt Manager (add/edit/rename/delete/view)
+      --prompt-create [name]      Interactively create a new preset
+      --<preset>          Run a prompt preset, e.g. --explain "closures"
       --browser           Configure default browser interactively
       --browser-order     Configure browser fallback order
       --browser-reset     Reset browser preferences to automatic
@@ -127,6 +409,17 @@ Options:
       --clear-conversation <id> Delete one saved conversation by id (prefix ok)
   -h, --help              Show this help
   -v, --version           Show version
+
+Prompt presets:
+  Named, reusable prompts that work like native commands:
+    node index.js --astronaut
+    node index.js --explain "JavaScript closures"
+    node index.js --fix test.py
+  Words after the flag fill the template's {{input}} slot; presets without
+  one get the words appended as "Extra focus".
+  Built-ins: ${Object.keys(BUILTIN_PROMPTS).map((name) => `--${name}`).join(", ")}
+  Custom presets live in .askweb-prompts.json next to index.js - manage
+  them with --prompts.
 
 Conversations:
   Every run saves its Q&A history locally to .chatgpt-conversations.json.
@@ -138,6 +431,10 @@ Notes:
   Browser profiles and history live in the install directory, so you can
   run askweb from any working directory; only -o resolves relative to
   your current directory.
+  Large contexts: payloads over ~25 KB are delivered automatically - as a
+  single file attachment when possible, otherwise as a numbered multipart
+  transmission that ChatGPT answers only after the final part arrives.
+  Logged-out chats cap out around ~50 KB total; log in to send more.
   If the browser opens but you are not logged in, log in inside the window
   or run once with --login; the session persists for future runs.
 
@@ -148,6 +445,11 @@ Examples:
   askweb --new "Start a fresh discussion about React"
   askweb "Review this code" src/index.js utils.js
   askweb -o summary.md "Summarize" @notes.md
+  askweb --prompts
+  askweb --prompt-create astronaut
+  askweb --astronaut
+  askweb --explain "JavaScript closures"
+  askweb --find-error src/index.js utils.js
   askweb -o out.md -- "-explain this flag"`);
 }
 
@@ -164,6 +466,9 @@ function parseCliArgs(argv = process.argv.slice(2)) {
         newConversation: false,
         showHelp: false,
         showVersion: false,
+        promptPreset: null,
+        promptCreate: null,
+        promptsAction: null,
         outputFile: DEFAULT_OUTPUT_FILE,
         questionArgs: [],
     };
@@ -241,6 +546,22 @@ function parseCliArgs(argv = process.argv.slice(2)) {
             continue;
         }
 
+        if (arg === "--prompts") {
+            options.promptsAction = "manager";
+            continue;
+        }
+
+        if (arg === "--prompt-create") {
+            const next = argv[i + 1];
+            if (next && !next.startsWith("-")) {
+                options.promptCreate = stripShellQuotes(next);
+                i++;
+            } else {
+                options.promptCreate = "";
+            }
+            continue;
+        }
+
         if (arg === "--output" || arg === "-o") {
             const value = argv[i + 1];
             if (!value) throw new Error(`${arg} requires a file path`);
@@ -257,6 +578,13 @@ function parseCliArgs(argv = process.argv.slice(2)) {
         }
 
         if (arg.startsWith("-")) {
+            if (arg.startsWith("--")) {
+                const presetName = arg.slice(2).toLowerCase();
+                if (loadPromptRegistry().has(presetName)) {
+                    options.promptPreset = presetName;
+                    continue;
+                }
+            }
             throw new Error(`Unknown option: ${arg}\nRun \`node index.js --help\` for usage.`);
         }
 
@@ -286,13 +614,21 @@ function wantsLogin() {
 function parseQuestion(args = CLI.questionArgs) {
     const textParts = [];
     const fileRefs = [];
+    const seenFiles = new Set();
+    const addFileRef = (ref) => {
+        const resolved = path.resolve(ref);
+        if (!seenFiles.has(resolved)) {
+            seenFiles.add(resolved);
+            fileRefs.push(ref);
+        }
+    };
 
     for (const rawArg of args) {
         const arg = stripShellQuotes(rawArg);
         if (!arg) continue;
 
         if (looksLikeExistingFile(arg)) {
-            fileRefs.push(arg);
+            addFileRef(arg);
             continue;
         }
 
@@ -301,17 +637,38 @@ function parseQuestion(args = CLI.questionArgs) {
             if (!token) continue;
 
             if (token.startsWith("@") && token.length > 1) {
-                fileRefs.push(stripShellQuotes(token.slice(1)));
+                addFileRef(stripShellQuotes(token.slice(1)));
             } else if (looksLikeExistingFile(token)) {
-                fileRefs.push(token);
+                addFileRef(token);
             } else {
                 textParts.push(token);
             }
         }
     }
 
-    const text = textParts.join(" ").trim();
-    return { text: text || DEFAULT_QUESTION, files: fileRefs };
+    const extra = textParts.join(" ").trim();
+    const presetName = CLI.promptPreset;
+    let text;
+    if (presetName) {
+        const preset = loadPromptRegistry().get(presetName);
+        if (preset.arguments) {
+            if (!extra) {
+                throw new Error(
+                    `Preset --${presetName} takes an argument, e.g.: node index.js --${presetName} "your input"`
+                );
+            }
+            text = preset.prompt.split(/\{\{\s*input\s*\}\}/).join(extra);
+        } else {
+            text = extra ? `${preset.prompt}\n\nExtra focus: ${extra}` : preset.prompt;
+        }
+        console.log(
+            `>> Using prompt preset "--${presetName}"${preset.description ? ` (${preset.description})` : ""}.`
+        );
+    } else {
+        text = extra || DEFAULT_QUESTION;
+    }
+
+    return { text, files: fileRefs };
 }
 
 function stripShellQuotes(value) {
@@ -342,7 +699,10 @@ function loadFiles(fileRefs) {
         const buffer = fs.readFileSync(fullPath);
         let content = isText ? buffer.toString("utf8") : buffer.toString("base64");
         const truncated = content.length > MAX_FILE_CHARS;
-        if (truncated) content = content.slice(0, MAX_FILE_CHARS);
+        if (truncated) {
+            console.log(`>> ${path.basename(fullPath)} exceeds ${MAX_FILE_CHARS} chars, truncated.`);
+            content = content.slice(0, MAX_FILE_CHARS);
+        }
 
         return { name: path.basename(fullPath), fullPath, isText, content, truncated };
     });
@@ -371,6 +731,26 @@ function fileBlock(file) {
 }
 
 const DECODE_NOTE = '\n\nAny <file> block with encoding="base64" contains base64-encoded bytes. Decode those blocks before analyzing them.';
+
+const ACTIVE_TEMP_FILES = [];
+
+function stageTempPayload(payload) {
+    try {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "askweb-payload-"));
+        const file = path.join(dir, "payload.md");
+        fs.writeFileSync(file, payload, "utf8");
+        ACTIVE_TEMP_FILES.push(dir);
+        return { name: "payload.md", fullPath: file, isText: true, content: payload, truncated: false };
+    } catch {
+        return null;
+    }
+}
+
+function cleanupTempPayloads() {
+    for (const dir of ACTIVE_TEMP_FILES.splice(0)) {
+        fs.rmSync(dir, { recursive: true, force: true });
+    }
+}
 
 const NO_AUTH_MODAL = '[data-testid="modal-no-auth-login"]';
 const BLOCKER_SELECTOR = '[role="dialog"], [aria-modal="true"], [data-testid*="modal"], [class*="modal"], [class*="popover"]';
@@ -501,6 +881,33 @@ async function trySend(page, sendButton, { requireVisible = false, force = false
     } else {
         await page.keyboard.press("Enter");
     }
+}
+
+async function pressSendAndConfirm(page, timeoutMs = 8000) {
+    const sendButton = page.locator(SELECTORS.sendButton).first();
+    const countBefore = await page.locator(SELECTORS.userMessage).count();
+    await trySend(page, sendButton, { requireVisible: true });
+
+    const sentDetected = await page
+        .waitForFunction(
+            ({ selector, before }) => document.querySelectorAll(selector).length > before,
+            { selector: SELECTORS.userMessage, before: countBefore },
+            { timeout: timeoutMs }
+        )
+        .then(() => true)
+        .catch(() => false);
+
+    if (!sentDetected) {
+        console.log(">> Send may have failed, retrying...");
+        await dismissAndSettle(page);
+        const retryInput = promptInput(page);
+        if ((await retryInput.count()) > 0) {
+            await focusComposer(retryInput);
+        }
+        await trySend(page, sendButton);
+        await page.waitForTimeout(2000);
+    }
+    return sentDetected;
 }
 
 async function resetComposer(page, targetUrl = URL) {
@@ -897,19 +1304,220 @@ async function pasteIntoComposer(page, input, text) {
     }
 }
 
-async function typePrompt(page, input, question, attached) {
+async function typePrompt(page, input, text) {
     await dismissBlockingUI(page);
 
-    const pasteFiles = !attached && question.files.length > 0;
     await focusComposer(input);
     await input.fill("");
 
-    const payload = pasteFiles ? buildFullPrompt(question) : question.text;
-    if (payload) {
-        await pasteIntoComposer(page, input, payload);
+    if (text) {
+        await pasteIntoComposer(page, input, text);
     }
 
-    await page.waitForTimeout(pasteFiles ? 500 : 400);
+    await page.waitForTimeout(400);
+}
+
+function splitPayloadChunks(text, size = PAYLOAD_CHUNK_SIZE) {
+    const chunks = [];
+    let offset = 0;
+    while (offset < text.length) {
+        let end = Math.min(offset + size, text.length);
+        const lastCode = text.charCodeAt(end - 1);
+        if (lastCode >= 0xd800 && lastCode <= 0xdbff && end < text.length) end += 1;
+        chunks.push(text.slice(offset, end));
+        offset = end;
+    }
+    return chunks;
+}
+
+function buildTransmissionPlan(payload, chunkSize = PAYLOAD_CHUNK_SIZE) {
+    const chunks = splitPayloadChunks(payload, chunkSize);
+    const total = chunks.length;
+    const header = [
+        `[TRANSMISSION HEADER] I am sending a document in ${total} numbered part(s).`,
+        "Each part is delimited by [PAYLOAD PART i/N] ... [/PAYLOAD PART i/N].",
+        'After each part, reply with ONLY "OK". Do not analyze or answer anything yet.',
+        "Each opening tag carries chars=<length>; use it to check nothing was truncated.",
+        "When I send TRANSMISSION COMPLETE, verify all parts arrived, report any gap, then answer my question.",
+    ].join("\n");
+
+    const parts = chunks.map((chunk, i) => {
+        const open = `[PAYLOAD PART ${i + 1}/${total} chars=${chunk.length}]`;
+        const close = `[/PAYLOAD PART ${i + 1}/${total}]`;
+        const body = `${open}\n${chunk}\n${close}`;
+        return i === 0 ? `${header}\n\n${body}` : body;
+    });
+    return { parts, totalParts: total, totalChars: payload.length };
+}
+
+function buildTransmissionFinale(total, finalQuestion) {
+    const confirm = `TRANSMISSION COMPLETE - all ${total} part(s) sent (1..${total}). Cross-check every chars= value against what you received and briefly note any missing/truncated part, then answer my question below.`;
+    return finalQuestion ? `${confirm}\n\nMy question: ${finalQuestion}` : confirm;
+}
+
+async function waitForGenerationEnd(page, timeoutMs = 10 * 60 * 1000) {
+    const stopButton = page.locator(SELECTORS.stopButton).first();
+    const deadline = Date.now() + timeoutMs;
+    let noticed = false;
+    while (Date.now() < deadline) {
+        if (!(await stopButton.isVisible().catch(() => false))) return true;
+        if (!noticed) {
+            console.log(">> Waiting for in-flight generation to settle...");
+            noticed = true;
+        }
+        await page.waitForTimeout(750);
+    }
+    return false;
+}
+
+async function composerHasContent(page, needle, minLength) {
+    return promptInput(page)
+        .evaluate(
+            (el, { needle, minLength }) => {
+                const text = "value" in el ? el.value : el.innerText || el.textContent || "";
+                return text.includes(needle) && text.length >= minLength;
+            },
+            { needle, minLength }
+        )
+        .catch(() => false);
+}
+
+async function sendButtonUsable(page) {
+    return page
+        .evaluate(() => {
+            const btn = document.querySelector('[data-testid="send-button"]');
+            return !!btn && !btn.disabled && btn.getAttribute("aria-disabled") !== "true";
+        })
+        .catch(() => false);
+}
+
+async function waitForPartLanding(page, closeTag, countBefore, timeoutMs = 20000) {
+    const deadline = Date.now() + timeoutMs;
+    let lastSnippet = "";
+    while (Date.now() < deadline) {
+        const state = await page
+            .evaluate(
+                ({ selector, needle, before }) => {
+                    const msgs = document.querySelectorAll(selector);
+                    if (msgs.length <= before) return { ok: false, snippet: "" };
+                    const last = msgs[msgs.length - 1];
+                    const text = (last.innerText || "").trim();
+                    return { ok: text.includes(needle), snippet: text.slice(0, 120) };
+                },
+                { selector: SELECTORS.userMessage, needle: closeTag, before: countBefore }
+            )
+            .catch(() => ({ ok: false, snippet: "" }));
+        if (state.ok) return { ok: true, snippet: "" };
+        lastSnippet = state.snippet;
+        await page.waitForTimeout(600);
+    }
+    return { ok: false, snippet: lastSnippet };
+}
+
+async function collectFailureDiagnostics(page) {
+    try {
+        const ready = await isPromptReady(page);
+        const text = await page
+            .evaluate(() => document.body.innerText.replace(/\s+/g, " ").slice(0, 300))
+            .catch(() => "");
+        return `(promptReady=${ready}, page: ${text || "(empty)"})`;
+    } catch {
+        return "";
+    }
+}
+
+async function transmitPart(page, input, part, index, total) {
+    const openTag = `[PAYLOAD PART ${index}/${total} chars=${part.length}]`;
+    const closeTag = `[/PAYLOAD PART ${index}/${total}]`;
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        process.stdout.write(`>> Sending part ${index}/${total} (${(part.length / 1024).toFixed(1)} KB)...`);
+        await typePrompt(page, input, part);
+
+        if (!(await composerHasContent(page, closeTag, Math.floor(part.length * 0.9)))) {
+            console.log(" composer incomplete, repasting...");
+            await typePrompt(page, input, part);
+            if (!(await composerHasContent(page, closeTag, Math.floor(part.length * 0.9)))) {
+                console.log(` still incomplete (attempt ${attempt}/2).`);
+                continue;
+            }
+        }
+
+        if (!(await sendButtonUsable(page))) {
+            console.log(" send button not enabled yet, waiting...");
+            await page.waitForTimeout(3000);
+        }
+
+        const countBefore = await page.locator(SELECTORS.userMessage).count();
+        await trySend(page, page.locator(SELECTORS.sendButton).first(), { requireVisible: true });
+
+        const landing = await waitForPartLanding(page, closeTag, countBefore);
+        if (landing.ok) {
+            console.log(" landed.");
+            return true;
+        }
+
+        console.log(` not confirmed (attempt ${attempt}/2)${landing.snippet ? `, last message starts: "${landing.snippet}"` : ""}.`);
+        if (attempt < 2) {
+            await page.waitForTimeout(8000);
+            await dismissAndSettle(page, 500);
+        }
+    }
+
+    const diag = await collectFailureDiagnostics(page);
+    const ceilingHint =
+        index >= 2
+            ? " If early parts landed but a later one persistently fails, the session likely hit the anonymous usage/context limit - log in (askweb --login) to lift it."
+            : "";
+    throw new Error(`Chunked transmission aborted: part ${index}/${total} could not be delivered after retries. ${ceilingHint}${diag}`);
+}
+
+async function composerEmpty(page) {
+    return promptInput(page)
+        .evaluate((el) => {
+            const text = "value" in el ? el.value : el.innerText || el.textContent || "";
+            return text.trim().length < 5;
+        })
+        .catch(() => false);
+}
+
+async function sendFinaleConfirmed(page, input, text, attempts = 3) {
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        await typePrompt(page, input, text);
+
+        const userBefore = await page.locator(SELECTORS.userMessage).count();
+        await trySend(page, page.locator(SELECTORS.sendButton).first(), { requireVisible: true });
+
+        const deadline = Date.now() + 20000;
+        let elapsed = 0;
+        while ((elapsed = 20000 - (deadline - Date.now())) < 20000) {
+            const users = await page.locator(SELECTORS.userMessage).count();
+            if (users > userBefore) return true;
+            if (elapsed > 1200 && (await composerEmpty(page))) return true;
+            await page.waitForTimeout(600);
+        }
+
+        console.log(`>> TRANSMISSION COMPLETE not confirmed (attempt ${attempt}/${attempts}).`);
+        if (attempt < attempts) await waitForGenerationEnd(page);
+    }
+    return false;
+}
+
+async function sendChunkedPayload(page, input, plan, finalQuestion) {
+    for (let i = 0; i < plan.totalParts; i++) {
+        if (i > 0) await page.waitForTimeout(1500);
+        await transmitPart(page, input, plan.parts[i], i + 1, plan.totalParts);
+    }
+
+    console.log(">> All parts delivered, sending TRANSMISSION COMPLETE + question...");
+    const baseline = await page.locator(SELECTORS.assistantMessage).count();
+    const sent = await sendFinaleConfirmed(page, input, buildTransmissionFinale(plan.totalParts, finalQuestion));
+    if (!sent) {
+        throw new Error(
+            "TRANSMISSION COMPLETE could not be delivered after retries - the session likely stopped accepting messages. Check the browser window."
+        );
+    }
+    return baseline;
 }
 
 async function promptHasExpectedText(page, expectedParts) {
@@ -918,6 +1526,17 @@ async function promptHasExpectedText(page, expectedParts) {
         .evaluate((el) => ("value" in el ? el.value : el.innerText || el.textContent || ""))
         .catch(() => "");
     return expectedParts.every((part) => typed.includes(part));
+}
+
+async function looksLoggedOut(page) {
+    return page
+        .evaluate(() => {
+            const text = document.body ? document.body.innerText : "";
+            const hasSignUp = /\bsign\s*up\b/i.test(text);
+            const hasLogIn = /\blog\s*in\b/i.test(text);
+            return hasSignUp && hasLogIn;
+        })
+        .catch(() => false);
 }
 
 async function sendQuestion(page, question, targetUrl = URL) {
@@ -947,7 +1566,66 @@ async function sendQuestion(page, question, targetUrl = URL) {
         await dismissAndSettle(page);
     }
 
+    const payload = attached ? question.text : buildFullPrompt(question);
+    let deliveryPlan = null;
+    let stagedAttachmentName = null;
+
+    if (!attached && payload.length > SINGLE_PASTE_MAX) {
+        console.log(
+            `>> Payload is ${(payload.length / 1024).toFixed(1)} KB, above the ${Math.round(SINGLE_PASTE_MAX / 1024)} KB single-message budget.`
+        );
+        const staged = stageTempPayload(payload);
+        if (staged) {
+            try {
+                await attachFiles(page, [staged]);
+                attached = true;
+                stagedAttachmentName = staged.name;
+                question.deliveryMeta = { mode: "attachment", chars: payload.length };
+                console.log(`>> Payload uploaded as a single attachment (${staged.name}).`);
+                await page.waitForTimeout(3000);
+            } catch (error) {
+                console.log(`>> Single-file attachment failed (${firstLine(error)}), switching to chunked transmission.`);
+                await resetComposer(page, targetUrl);
+            }
+        }
+        if (!attached) {
+            deliveryPlan = buildTransmissionPlan(payload);
+            const loggedOut = await looksLoggedOut(page);
+            if (loggedOut && deliveryPlan.totalParts > ANON_MAX_PARTS) {
+                // Anonymous chats only tolerate a handful of turns, so consolidate into fewer, larger parts.
+                const adaptiveSize = Math.min(ANON_PART_SIZE_CEILING, Math.ceil(payload.length / ANON_MAX_PARTS));
+                if (Math.ceil(payload.length / adaptiveSize) <= ANON_MAX_PARTS) {
+                    deliveryPlan = buildTransmissionPlan(payload, adaptiveSize);
+                    console.log(
+                        `>> Logged out: consolidating into ${deliveryPlan.totalParts} larger part(s) of ~${Math.round(adaptiveSize / 1024)} KB to stay within anonymous chat limits.`
+                    );
+                } else {
+                    throw new Error(
+                        `Payload is ${(payload.length / 1024).toFixed(1)} KB - an anonymous chat can only receive about ${Math.round(
+                            (ANON_MAX_PARTS * ANON_PART_SIZE_CEILING) / 1024
+                        )} KB in ${ANON_MAX_PARTS} part(s). Run \`node index.js --login\` once - the session persists - or trim the input.`
+                    );
+                }
+            }
+            question.deliveryMeta = { mode: "chunked", parts: deliveryPlan.totalParts, chars: deliveryPlan.totalChars };
+            console.log(
+                `>> Chunked transmission planned: ${deliveryPlan.totalParts} part(s), ${(deliveryPlan.totalChars / 1024).toFixed(1)} KB total.`
+            );
+        }
+    }
+
+    if (deliveryPlan) {
+        const finalInput = promptInput(page);
+        const baseline = await sendChunkedPayload(page, finalInput, deliveryPlan, question.originalText ?? question.text);
+        markPhase("write");
+        markPhase("send");
+        return baseline;
+    }
+
     const finalInput = promptInput(page);
+    const composerText = stagedAttachmentName
+        ? `${question.text}\n\n(The complete document context was attached as "${stagedAttachmentName}".)`.trim()
+        : payload;
     const expectedParts = [];
     if (question.text) expectedParts.push(question.text.trim().slice(0, 60));
     if (!attached && question.files.length > 0) expectedParts.push("</file>");
@@ -955,7 +1633,7 @@ async function sendQuestion(page, question, targetUrl = URL) {
     console.log(">> Writing prompt...");
     let verified = false;
     for (let attempt = 1; attempt <= 3; attempt++) {
-        await typePrompt(page, finalInput, question, attached);
+        await typePrompt(page, finalInput, composerText);
         if (await promptHasExpectedText(page, expectedParts)) {
             verified = true;
             break;
@@ -968,31 +1646,7 @@ async function sendQuestion(page, question, targetUrl = URL) {
     markPhase("write");
 
     console.log(">> Sending prompt...");
-    const sendButton = page.locator(SELECTORS.sendButton).first();
-    const userMessages = page.locator(SELECTORS.userMessage);
-    const userCountBefore = await userMessages.count();
-
-    await trySend(page, sendButton, { requireVisible: true });
-
-    const sentDetected = await page
-        .waitForFunction(
-            ({ selector, before }) => document.querySelectorAll(selector).length > before,
-            { selector: SELECTORS.userMessage, before: userCountBefore },
-            { timeout: 5000 }
-        )
-        .then(() => true)
-        .catch(() => false);
-
-    if (!sentDetected) {
-        console.log(">> Send may have failed, retrying...");
-        await dismissAndSettle(page);
-        const retryInput = promptInput(page);
-        if ((await retryInput.count()) > 0) {
-            await focusComposer(retryInput);
-        }
-        await trySend(page, sendButton);
-        await page.waitForTimeout(2000);
-    }
+    await pressSendAndConfirm(page);
     markPhase("send");
 
     return assistantCountBefore;
@@ -1039,31 +1693,46 @@ async function extractAnswerMarkdown(page, answer) {
 
 async function waitForAnswer(page, assistantCountBefore = 0) {
     const replies = page.locator(SELECTORS.assistantMessage);
-    await page.waitForFunction(
-        ({ selector, countBefore }) => document.querySelectorAll(selector).length > countBefore,
-        { selector: SELECTORS.assistantMessage, countBefore: assistantCountBefore },
-        { timeout: 60000 }
-    );
+    const previousLastText = (await replies.last().innerText().catch(() => "")).trim();
+
+    const deadline = Date.now() + 3 * 60 * 1000;
+    let sawGeneration = false;
+    let ready = false;
+
+    while (Date.now() < deadline) {
+        const stopVisible = await page.locator(SELECTORS.stopButton).first().isVisible().catch(() => false);
+        if (stopVisible) sawGeneration = true;
+
+        const count = await replies.count();
+        const grew = count > assistantCountBefore;
+        const newText = count > 0 ? (await replies.last().innerText().catch(() => "")).trim() : "";
+
+        if (grew || ((sawGeneration || (await composerEmpty(page))) && !stopVisible && newText && newText !== previousLastText)) {
+            ready = true;
+            break;
+        }
+        await page.waitForTimeout(700);
+    }
+
+    if (!ready) {
+        throw new Error("No answer appeared - the final message may not have been accepted. Check the browser window.");
+    }
 
     let stableCount = 0;
     let prevLength = -1;
     const answer = replies.last();
-    await answer.waitFor({ state: "visible", timeout: 60000 });
+    await answer.waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
 
     while (stableCount < STABLE_POLLS_REQUIRED) {
         await page.waitForTimeout(POLL_MS);
 
-        const count = await replies.count();
         const stopButton = page.locator(SELECTORS.stopButton).first();
         const stopVisible = await stopButton.isVisible().catch(() => false);
 
-        let lastLength = 0;
-        if (count > assistantCountBefore) {
-            const text = await answer.innerText().catch(() => "");
-            lastLength = text.trim().length;
-        }
+        const text = await answer.innerText().catch(() => "");
+        const lastLength = text.trim().length;
 
-        const unchanged = count > assistantCountBefore && lastLength === prevLength && lastLength > 0 && !stopVisible;
+        const unchanged = lastLength === prevLength && lastLength > 0 && !stopVisible;
         stableCount = unchanged ? stableCount + 1 : 0;
         prevLength = lastLength;
     }
@@ -1226,6 +1895,7 @@ async function recordConversation(page, run) {
             url: match ? `${URL}c/${match[1]}` : null,
             title: title || run.questionText.slice(0, 60),
             updatedAt: new Date().toISOString(),
+            ...(run.meta ? { delivery: run.meta } : {}),
             messages: [
                 ...seedMessages,
                 { role: "user", content: run.questionText },
@@ -1410,6 +2080,9 @@ async function main() {
     if (CLI.showHelp) return showHelp();
     if (CLI.showVersion) return console.log(`ChatGPT CLI v${VERSION}`);
 
+    if (CLI.promptCreate !== null) return createPromptFlow(CLI.promptCreate);
+    if (CLI.promptsAction === "manager") return runPromptManager();
+
     if (CLI.configureBrowser) return configureDefaultBrowser();
     if (CLI.configureBrowserOrder) return configureBrowserOrder();
     if (CLI.resetBrowserPrefs) return resetBrowserPreferences();
@@ -1441,6 +2114,7 @@ async function main() {
         if (shuttingDown) return;
         shuttingDown = true;
         console.log("\n>> Closing browser...");
+        cleanupTempPayloads();
         await context.close().catch(() => {});
         process.exit(0);
     };
@@ -1471,6 +2145,7 @@ async function main() {
             questionText: question.originalText ?? question.text,
             answer: answer.trim(),
             seedMessages: continuing?.messages || [],
+            meta: question.deliveryMeta || null,
         });
         markPhase("save");
         printTimings();
@@ -1481,6 +2156,7 @@ async function main() {
             );
         }
     } finally {
+        cleanupTempPayloads();
         await context.close();
     }
 }
