@@ -1483,6 +1483,9 @@ async function composerEmpty(page) {
 
 async function sendFinaleConfirmed(page, input, text, attempts = 3) {
     for (let attempt = 1; attempt <= attempts; attempt++) {
+        // Sending while a reply is still generating is a guaranteed no-op (button is a stop button),
+        // which used to burn the whole confirmation timeout on attempt 1 every single time.
+        await waitForGenerationEnd(page);
         await typePrompt(page, input, text);
 
         const userBefore = await page.locator(SELECTORS.userMessage).count();
