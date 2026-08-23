@@ -8,3 +8,4 @@ user-data-edge/
 .chatgpt-conversations.json
 output.md
 answer.md
+error.md
