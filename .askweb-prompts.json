@@ -2,5 +2,9 @@
   "astro": {
     "prompt": "invent a fictional astronaut, give them a name, an age, and a spaceship and let me know",
     "description": "Sci-fi character generator"
+  },
+  "top1error": {
+    "prompt": "You are a helpful assistant that finds the top one error in a given code snippet. Please provide a concise explanation of the error and suggest a fix.",
+    "description": "Code error detection"
   }
 }

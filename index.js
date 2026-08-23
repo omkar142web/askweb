@@ -24,7 +24,8 @@ const MAX_FILE_CHARS = 400000;
 const SINGLE_PASTE_MAX = 25000;
 const PAYLOAD_CHUNK_SIZE = Number(process.env.ASKWEB_CHUNK_SIZE) || 18000;
 const ANON_MAX_PARTS = 3;
-const ANON_PART_SIZE_CEILING = 27000;
+// Empirically validated: single anonymous-chat messages up to ~52 KB paste and land fine.
+const ANON_PART_SIZE_CEILING = 50000;
 const DEFAULT_QUESTION = "What is JavaScript?";
 const DEFAULT_OUTPUT_FILE = "./output.md";
 const PREFS_FILE = path.join(__dirname, ".browser-prefs.json");
@@ -632,17 +633,11 @@ function parseQuestion(args = CLI.questionArgs) {
             continue;
         }
 
-        for (const rawToken of arg.split(/\s+/)) {
-            const token = stripShellQuotes(rawToken);
-            if (!token) continue;
-
-            if (token.startsWith("@") && token.length > 1) {
-                addFileRef(stripShellQuotes(token.slice(1)));
-            } else if (looksLikeExistingFile(token)) {
-                addFileRef(token);
-            } else {
-                textParts.push(token);
-            }
+        // Each arg is a single shell token - never whitespace-split it, or "@path with spaces" breaks apart.
+        if (arg.startsWith("@") && arg.length > 1) {
+            addFileRef(stripShellQuotes(arg.slice(1)));
+        } else {
+            textParts.push(arg);
         }
     }
 
