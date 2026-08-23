@@ -1545,10 +1545,13 @@ async function sendQuestion(page, question, targetUrl = URL) {
     const assistantCountBefore = await page.locator(SELECTORS.assistantMessage).count();
 
     let attached = false;
+    const loggedOut = await looksLoggedOut(page);
     if (question.files.length > 0) {
         console.log(`>> Loaded ${question.files.length} file(s): ${question.files.map((file) => file.name).join(", ")}`);
         if (shouldPasteFiles(question.files)) {
             console.log(">> Text/code file detected, using paste mode.");
+        } else if (loggedOut) {
+            console.log(">> Not logged in - file upload is unavailable, falling back to paste mode.");
         } else {
             try {
                 await attachFiles(page, question.files);
@@ -1574,7 +1577,12 @@ async function sendQuestion(page, question, targetUrl = URL) {
         console.log(
             `>> Payload is ${(payload.length / 1024).toFixed(1)} KB, above the ${Math.round(SINGLE_PASTE_MAX / 1024)} KB single-message budget.`
         );
-        const staged = stageTempPayload(payload);
+        let staged = null;
+        if (loggedOut) {
+            console.log(">> Not logged in - skipping upload attempts, going straight to chunked transmission.");
+        } else {
+            staged = stageTempPayload(payload);
+        }
         if (staged) {
             try {
                 await attachFiles(page, [staged]);
@@ -1590,7 +1598,6 @@ async function sendQuestion(page, question, targetUrl = URL) {
         }
         if (!attached) {
             deliveryPlan = buildTransmissionPlan(payload);
-            const loggedOut = await looksLoggedOut(page);
             if (loggedOut && deliveryPlan.totalParts > ANON_MAX_PARTS) {
                 // Anonymous chats only tolerate a handful of turns, so consolidate into fewer, larger parts.
                 const adaptiveSize = Math.min(ANON_PART_SIZE_CEILING, Math.ceil(payload.length / ANON_MAX_PARTS));
