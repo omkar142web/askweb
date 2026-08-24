@@ -433,9 +433,14 @@ Notes:
   run askweb from any working directory; only -o resolves relative to
   your current directory.
   Large contexts: payloads over ~25 KB are delivered automatically - as a
-  single file attachment when possible, otherwise as a numbered multipart
-  transmission that ChatGPT answers only after the final part arrives.
-  Logged-out chats cap out around ~50 KB total; log in to send more.
+  single file attachment when logged in, otherwise as a numbered multipart
+  transmission (fewer, larger parts are chosen automatically) that ChatGPT
+  answers only after the final part arrives.
+  Logged-out chats accept up to ~145 KB this way; beyond that, log in and
+  payloads upload as one attachment instead. Upload attempts are skipped
+  entirely while logged out to save time.
+  Set ASKWEB_CHUNK_SIZE=<chars> to override the default part size.
+  Quoted "@paths with spaces" work: askweb "summarize" "@C:\\my notes\\doc.md"
   If the browser opens but you are not logged in, log in inside the window
   or run once with --login; the session persists for future runs.
 
@@ -1440,7 +1445,9 @@ async function transmitPart(page, input, part, index, total) {
 
         if (!(await sendButtonUsable(page))) {
             console.log(" send button not enabled yet, waiting...");
-            await page.waitForTimeout(3000);
+            // Poll until any in-flight reply finishes instead of guessing with a fixed sleep -
+            // clicking while generating hits the stop button and silently wastes this attempt.
+            await waitForGenerationEnd(page);
         }
 
         const countBefore = await page.locator(SELECTORS.userMessage).count();
