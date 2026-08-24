@@ -22,10 +22,10 @@ const POLL_MS = 1000;
 const STABLE_POLLS_REQUIRED = 3;
 const MAX_FILE_CHARS = 400000;
 const SINGLE_PASTE_MAX = 25000;
-const PAYLOAD_CHUNK_SIZE = Number(process.env.ASKWEB_CHUNK_SIZE) || 18000;
-const ANON_MAX_PARTS = 3;
+const ANON_MAX_PARTS = 6;
 // Empirically validated: single anonymous-chat messages up to ~52 KB paste and land fine.
 const ANON_PART_SIZE_CEILING = 50000;
+const PART_TAG_OVERHEAD = 1000;
 const DEFAULT_QUESTION = "What is JavaScript?";
 const DEFAULT_OUTPUT_FILE = "./output.md";
 const PREFS_FILE = path.join(__dirname, ".browser-prefs.json");
@@ -434,12 +434,13 @@ Notes:
   your current directory.
   Large contexts: payloads over ~25 KB are delivered automatically - as a
   single file attachment when logged in, otherwise as a numbered multipart
-  transmission (fewer, larger parts are chosen automatically) that ChatGPT
-  answers only after the final part arrives.
-  Logged-out chats accept up to ~145 KB this way; beyond that, log in and
+  transmission packed into the fewest, largest messages ChatGPT reliably
+  accepts; it answers only after the final part arrives.
+  Logged-out chats accept up to ~293 KB this way; beyond that, log in and
   payloads upload as one attachment instead. Upload attempts are skipped
   entirely while logged out to save time.
-  Set ASKWEB_CHUNK_SIZE=<chars> to override the default part size.
+  Set ASKWEB_CHUNK_SIZE=<chars> to force a specific part size instead of
+  automatic packing.
   Quoted "@paths with spaces" work: askweb "summarize" "@C:\\my notes\\doc.md"
   If the browser opens but you are not logged in, log in inside the window
   or run once with --login; the session persists for future runs.
@@ -1317,7 +1318,7 @@ async function typePrompt(page, input, text) {
     await page.waitForTimeout(400);
 }
 
-function splitPayloadChunks(text, size = PAYLOAD_CHUNK_SIZE) {
+function splitPayloadChunks(text, size) {
     const chunks = [];
     let offset = 0;
     while (offset < text.length) {
@@ -1330,7 +1331,7 @@ function splitPayloadChunks(text, size = PAYLOAD_CHUNK_SIZE) {
     return chunks;
 }
 
-function buildTransmissionPlan(payload, chunkSize = PAYLOAD_CHUNK_SIZE) {
+function buildTransmissionPlan(payload, chunkSize) {
     const chunks = splitPayloadChunks(payload, chunkSize);
     const total = chunks.length;
     const header = [
@@ -1348,6 +1349,21 @@ function buildTransmissionPlan(payload, chunkSize = PAYLOAD_CHUNK_SIZE) {
         return i === 0 ? `${header}\n\n${body}` : body;
     });
     return { parts, totalParts: total, totalChars: payload.length };
+}
+
+function planTransmissionParts(payloadLength) {
+    const usablePerPart = ANON_PART_SIZE_CEILING - PART_TAG_OVERHEAD;
+    return Math.max(1, Math.ceil(payloadLength / usablePerPart));
+}
+
+function buildMinimalTransmissionPlan(payload) {
+    const totalParts = planTransmissionParts(payload.length);
+    return buildTransmissionPlan(payload, Math.ceil(payload.length / totalParts));
+}
+
+function resolveChunkSizeOverride() {
+    const manual = Number(process.env.ASKWEB_CHUNK_SIZE);
+    return Number.isFinite(manual) && manual > 0 ? Math.floor(manual) : null;
 }
 
 function buildTransmissionFinale(total, finalQuestion) {
@@ -1391,27 +1407,54 @@ async function sendButtonUsable(page) {
         .catch(() => false);
 }
 
-async function waitForPartLanding(page, closeTag, countBefore, timeoutMs = 20000) {
+async function transcriptContainsCloseTag(page, closeTag) {
+    return page
+        .evaluate(
+            ({ selector, needle }) => {
+                const msgs = document.querySelectorAll(selector);
+                for (const msg of msgs) {
+                    if ((msg.innerText || "").includes(needle)) return true;
+                }
+                return false;
+            },
+            { selector: SELECTORS.userMessage, needle: closeTag }
+        )
+        .catch(() => false);
+}
+
+async function waitForPartLanding(page, closeTag, timeoutMs = 30000) {
     const deadline = Date.now() + timeoutMs;
     let lastSnippet = "";
     while (Date.now() < deadline) {
-        const state = await page
+        if (await transcriptContainsCloseTag(page, closeTag)) return { ok: true, snippet: "" };
+        lastSnippet = await page
             .evaluate(
-                ({ selector, needle, before }) => {
+                (selector) => {
                     const msgs = document.querySelectorAll(selector);
-                    if (msgs.length <= before) return { ok: false, snippet: "" };
                     const last = msgs[msgs.length - 1];
-                    const text = (last.innerText || "").trim();
-                    return { ok: text.includes(needle), snippet: text.slice(0, 120) };
+                    return (((last && (last.innerText || "")) || "") + "").trim().slice(0, 120);
                 },
-                { selector: SELECTORS.userMessage, needle: closeTag, before: countBefore }
+                SELECTORS.userMessage
             )
-            .catch(() => ({ ok: false, snippet: "" }));
-        if (state.ok) return { ok: true, snippet: "" };
-        lastSnippet = state.snippet;
+            .catch(() => "");
         await page.waitForTimeout(600);
     }
     return { ok: false, snippet: lastSnippet };
+}
+
+async function looksLikeUsageLimit(page) {
+    return page
+        .evaluate(() => {
+            const clone = document.body.cloneNode(true);
+            clone.querySelectorAll("[data-message-author-role]").forEach((node) => node.remove());
+            const text = clone.textContent || "";
+            return (
+                /\busage\s+(limit|cap)\b/i.test(text) ||
+                /\b(hit|hitting|reached|reach)\b[^\n]{0,40}\b(limit|cap)\b/i.test(text) ||
+                /\banonymous\b[^\n]{0,80}\blimit\b/i.test(text)
+            );
+        })
+        .catch(() => false);
 }
 
 async function collectFailureDiagnostics(page) {
@@ -1431,6 +1474,13 @@ async function transmitPart(page, input, part, index, total) {
     const closeTag = `[/PAYLOAD PART ${index}/${total}]`;
 
     for (let attempt = 1; attempt <= 2; attempt++) {
+        // A prior attempt may have landed without being confirmed (virtualized transcript
+        // hid it from the old count-based check) - never resend a part already in the chat.
+        if (attempt > 1 && (await transcriptContainsCloseTag(page, closeTag))) {
+            console.log(`>> Part ${index}/${total} is already in the transcript, treating as landed.`);
+            return true;
+        }
+
         process.stdout.write(`>> Sending part ${index}/${total} (${(part.length / 1024).toFixed(1)} KB)...`);
         await typePrompt(page, input, part);
 
@@ -1450,16 +1500,23 @@ async function transmitPart(page, input, part, index, total) {
             await waitForGenerationEnd(page);
         }
 
-        const countBefore = await page.locator(SELECTORS.userMessage).count();
         await trySend(page, page.locator(SELECTORS.sendButton).first(), { requireVisible: true });
 
-        const landing = await waitForPartLanding(page, closeTag, countBefore);
+        const landing = await waitForPartLanding(page, closeTag);
         if (landing.ok) {
             console.log(" landed.");
             return true;
         }
 
         console.log(` not confirmed (attempt ${attempt}/2)${landing.snippet ? `, last message starts: "${landing.snippet}"` : ""}.`);
+
+        if (await looksLikeUsageLimit(page)) {
+            const diag = await collectFailureDiagnostics(page);
+            throw new Error(
+                `Chunked transmission aborted: part ${index}/${total} was refused - this anonymous session hit ChatGPT's usage/context limit. Log in (askweb --login) to lift it.${diag}`
+            );
+        }
+
         if (attempt < 2) {
             await page.waitForTimeout(8000);
             await dismissAndSettle(page, 500);
@@ -1602,26 +1659,21 @@ async function sendQuestion(page, question, targetUrl = URL) {
             }
         }
         if (!attached) {
-            deliveryPlan = buildTransmissionPlan(payload);
+            const manualChunkSize = resolveChunkSizeOverride();
+            deliveryPlan = manualChunkSize
+                ? buildTransmissionPlan(payload, manualChunkSize)
+                : buildMinimalTransmissionPlan(payload);
             if (loggedOut && deliveryPlan.totalParts > ANON_MAX_PARTS) {
-                // Anonymous chats only tolerate a handful of turns, so consolidate into fewer, larger parts.
-                const adaptiveSize = Math.min(ANON_PART_SIZE_CEILING, Math.ceil(payload.length / ANON_MAX_PARTS));
-                if (Math.ceil(payload.length / adaptiveSize) <= ANON_MAX_PARTS) {
-                    deliveryPlan = buildTransmissionPlan(payload, adaptiveSize);
-                    console.log(
-                        `>> Logged out: consolidating into ${deliveryPlan.totalParts} larger part(s) of ~${Math.round(adaptiveSize / 1024)} KB to stay within anonymous chat limits.`
-                    );
-                } else {
-                    throw new Error(
-                        `Payload is ${(payload.length / 1024).toFixed(1)} KB - an anonymous chat can only receive about ${Math.round(
-                            (ANON_MAX_PARTS * ANON_PART_SIZE_CEILING) / 1024
-                        )} KB in ${ANON_MAX_PARTS} part(s). Run \`node index.js --login\` once - the session persists - or trim the input.`
-                    );
-                }
+                throw new Error(
+                    `Payload is ${(payload.length / 1024).toFixed(1)} KB - an anonymous chat can only receive about ${Math.round(
+                        (ANON_MAX_PARTS * ANON_PART_SIZE_CEILING) / 1024
+                    )} KB in ${ANON_MAX_PARTS} part(s). Run \`node index.js --login\` once - the session persists - or trim the input.`
+                );
             }
             question.deliveryMeta = { mode: "chunked", parts: deliveryPlan.totalParts, chars: deliveryPlan.totalChars };
             console.log(
-                `>> Chunked transmission planned: ${deliveryPlan.totalParts} part(s), ${(deliveryPlan.totalChars / 1024).toFixed(1)} KB total.`
+                `>> Chunked transmission planned: ${deliveryPlan.totalParts} part(s), ${(deliveryPlan.totalChars / 1024).toFixed(1)} KB total` +
+                    (manualChunkSize ? ` (ASKWEB_CHUNK_SIZE=${manualChunkSize}).` : ", packed to the fewest messages possible.")
             );
         }
     }
