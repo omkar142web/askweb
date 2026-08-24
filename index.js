@@ -1041,22 +1041,56 @@ async function waitForPromptInput(page) {
     }
 }
 
-async function waitForAttachmentChip(page, firstName) {
-    try {
-        await page.waitForFunction(
-            (name) => {
-                const text = document.body.innerText;
-                if (text.includes(name)) return true;
+async function attachmentChipProbe(page, fileName) {
+    return page
+        .evaluate(
+            ({ composerSelector, name }) => {
+                const composer = document.querySelector(composerSelector);
+                const region =
+                    (composer && composer.closest("form")) ||
+                    (composer && composer.parentElement && composer.parentElement.parentElement) ||
+                    document.body;
                 const stem = name.replace(/\.[^.]+$/, "");
-                return stem.length > 3 && text.includes(stem);
+                let present = false;
+                for (const el of region.querySelectorAll("*")) {
+                    if (el.closest(composerSelector)) continue;
+                    const text = (el.textContent || "").trim();
+                    if (text.length > 300) continue;
+                    const lower = text.toLowerCase();
+                    if (lower.includes(name.toLowerCase()) || (stem.length > 3 && lower.includes(stem.toLowerCase()))) {
+                        present = true;
+                        break;
+                    }
+                }
+                const uploading = !!region.querySelector('[role="progressbar"], .animate-spin');
+                return { present, uploading };
             },
-            firstName,
-            { timeout: 15000 }
-        );
-        return true;
-    } catch {
-        return false;
+            { composerSelector: SELECTORS.promptInput, name: fileName }
+        )
+        .catch(() => ({ present: false, uploading: true }));
+}
+
+async function waitForAttachmentChip(page, firstName) {
+    const deadline = Date.now() + 25000;
+    let cleanWithUpload = 0;
+    let presentStreak = 0;
+    while (Date.now() < deadline) {
+        const state = await attachmentChipProbe(page, firstName);
+        if (state.present) {
+            presentStreak += 1;
+            if (!state.uploading) {
+                cleanWithUpload += 1;
+                if (cleanWithUpload >= 2) return true;
+            } else if (presentStreak >= 8) {
+                return true;
+            }
+        } else {
+            presentStreak = 0;
+            cleanWithUpload = 0;
+        }
+        await page.waitForTimeout(700);
     }
+    return false;
 }
 
 async function attachViaDrop(page, files) {
@@ -1365,6 +1399,14 @@ function resolveChunkSizeOverride() {
     return Number.isFinite(manual) && manual > 0 ? Math.floor(manual) : null;
 }
 
+function buildDeliveryPlan(payload) {
+    const manualChunkSize = resolveChunkSizeOverride();
+    return {
+        plan: manualChunkSize ? buildTransmissionPlan(payload, manualChunkSize) : buildMinimalTransmissionPlan(payload),
+        manualChunkSize,
+    };
+}
+
 function buildTransmissionFinale(total, finalQuestion) {
     const confirm = `TRANSMISSION COMPLETE - all ${total} part(s) sent (1..${total}). Cross-check every chars= value against what you received and briefly note any missing/truncated part, then answer my question below.`;
     return finalQuestion ? `${confirm}\n\nMy question: ${finalQuestion}` : confirm;
@@ -1658,10 +1700,8 @@ async function sendQuestion(page, question, targetUrl = URL) {
             }
         }
         if (!attached) {
-            const manualChunkSize = resolveChunkSizeOverride();
-            deliveryPlan = manualChunkSize
-                ? buildTransmissionPlan(payload, manualChunkSize)
-                : buildMinimalTransmissionPlan(payload);
+            const { plan, manualChunkSize } = buildDeliveryPlan(payload);
+            deliveryPlan = plan;
             if (loggedOut && deliveryPlan.totalParts > ANON_MAX_PARTS) {
                 throw new Error(
                     `Payload is ${(payload.length / 1024).toFixed(1)} KB - an anonymous chat can only receive about ${Math.round(
@@ -1708,9 +1748,43 @@ async function sendQuestion(page, question, targetUrl = URL) {
     if (!verified) await focusComposer(finalInput);
     markPhase("write");
 
+    if (stagedAttachmentName) {
+        const chip = await attachmentChipProbe(page, stagedAttachmentName);
+        if (!chip.present) {
+            console.log(">> Attachment chip missing before send - falling back to chunked transmission.");
+            const { plan } = buildDeliveryPlan(buildFullPrompt(question));
+            deliveryPlan = plan;
+            question.deliveryMeta = { mode: "chunked-fallback", parts: deliveryPlan.totalParts, chars: deliveryPlan.totalChars };
+            const baseline = await sendChunkedPayload(page, finalInput, deliveryPlan, question.originalText ?? question.text);
+            markPhase("write");
+            markPhase("send");
+            return baseline;
+        }
+        if (chip.uploading) {
+            console.log(">> Attachment still uploading, waiting for it to finish...");
+            await waitForAttachmentChip(page, stagedAttachmentName);
+        }
+    }
+
     console.log(">> Sending prompt...");
     await pressSendAndConfirm(page);
     markPhase("send");
+
+    if (stagedAttachmentName) {
+        const sentWithFile = await page
+            .evaluate(
+                ({ selector, name }) => {
+                    const msgs = document.querySelectorAll(selector);
+                    const last = msgs[msgs.length - 1];
+                    return !!last && (last.innerText || "").toLowerCase().includes(name.toLowerCase());
+                },
+                { selector: SELECTORS.userMessage, name: stagedAttachmentName }
+            )
+            .catch(() => true);
+        if (!sentWithFile) {
+            console.log(">> Warning: sent message does not appear to carry the attachment.");
+        }
+    }
 
     return assistantCountBefore;
 }
