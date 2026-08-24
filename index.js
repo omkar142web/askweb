@@ -1338,8 +1338,7 @@ function buildTransmissionPlan(payload, chunkSize) {
         `[TRANSMISSION HEADER] I am sending a document in ${total} numbered part(s).`,
         "Each part is delimited by [PAYLOAD PART i/N] ... [/PAYLOAD PART i/N].",
         'After each part, reply with ONLY "OK". Do not analyze or answer anything yet.',
-        "Each opening tag carries chars=<length>; use it to check nothing was truncated.",
-        "When I send TRANSMISSION COMPLETE, verify all parts arrived, report any gap, then answer my question.",
+        "When I send TRANSMISSION COMPLETE, then answer my question.",
     ].join("\n");
 
     const parts = chunks.map((chunk, i) => {
