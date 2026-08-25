@@ -83,10 +83,6 @@ function isConflictingPromptName(name) {
     return RESERVED_PROMPT_FLAGS.has(name);
 }
 
-function promptNameConflictWarning(name) {
-    return `Warning: "--${name}" is already a real option, so the flag will always run that option - this preset would not be reachable as a command.`;
-}
-
 function normalizePromptEntry(entry) {
     let prompt;
     let description = "";
@@ -187,19 +183,18 @@ async function createPromptFlow(nameArg = "") {
         return;
     }
     if (isConflictingPromptName(name)) {
-        const proceed = (
-            await promptUser(`${promptNameConflictWarning(name)} Save anyway? (y/N): `)
-        ).toLowerCase();
-        if (proceed !== "y") {
-            console.log(">> Cancelled.");
-            return;
-        }
+        console.log(`>> Error: "${name}" is reserved by the CLI and cannot be used as a prompt name.`);
+        return;
     }
 
     const userEntries = readUserPrompts();
-    const exists = loadPromptRegistry().has(name);
-    if (exists) {
-        const overwrite = (await promptUser(`"${name}" already exists. Overwrite? (y/N): `)).toLowerCase();
+    const registry = loadPromptRegistry();
+    const existing = registry.get(name);
+    if (existing) {
+        const msg = existing.builtin
+            ? `"${name}" is a built-in preset. Overwrite it with a custom version? (y/N): `
+            : `"${name}" already exists. Overwrite? (y/N): `;
+        const overwrite = (await promptUser(msg)).toLowerCase();
         if (overwrite !== "y") {
             console.log(">> Cancelled.");
             return;
@@ -273,13 +268,8 @@ async function runPromptManager() {
                     continue;
                 }
                 if (isConflictingPromptName(newName)) {
-                    const proceed = (
-                        await promptUser(`${promptNameConflictWarning(newName)} Continue? (y/N): `)
-                    ).toLowerCase();
-                    if (proceed !== "y") {
-                        console.log(">> Cancelled.");
-                        continue;
-                    }
+                    console.log(`>> Error: "${newName}" is reserved by the CLI and cannot be used as a prompt name.`);
+                    continue;
                 }
                 if (loadPromptRegistry().has(newName)) {
                     console.log(`>> "${newName}" already exists.`);
@@ -588,6 +578,11 @@ function parseCliArgs(argv = process.argv.slice(2)) {
             if (arg.startsWith("--")) {
                 const presetName = arg.slice(2).toLowerCase();
                 if (loadPromptRegistry().has(presetName)) {
+                    if (options.promptPreset) {
+                        throw new Error(
+                            `Multiple prompt presets cannot be combined: --${options.promptPreset} and --${presetName}`
+                        );
+                    }
                     options.promptPreset = presetName;
                     continue;
                 }
