@@ -315,16 +315,33 @@ async function runPromptManager() {
 }
 
 const SELECTORS = {
-    promptInput: "#prompt-textarea",
-    sendButton: '[data-testid="send-button"]',
-    stopButton: '[data-testid="stop-button"]',
-    assistantMessage: '[data-message-author-role="assistant"]',
-    userMessage: '[data-message-author-role="user"]',
+    promptInput: [
+        "#mobile-composer-prompt",
+        'textarea[aria-label="Chat with ChatGPT"]',
+        'textarea[placeholder="Ask ChatGPT"]',
+        "#prompt-textarea",
+        '[contenteditable="true"][role="textbox"]',
+    ].join(", "),
+    sendButton: '[data-testid="send-button"], button[aria-label="Send message"]',
+    stopButton: '[data-testid="stop-button"], button[aria-label="Stop streaming"]',
+    assistantMessage: '[data-message-author-role="assistant"], [class*="_assistantMessage"]:not([class*="Actions"])',
+    userMessage: '[data-message-author-role="user"], [class*="_userMessageGroup"], [class*="_userMessage"]:not([class*="Actions"])',
     attachButton: '[data-testid="composer-plus-btn"]',
-    copyButton: '[data-testid="copy-turn-action-button"]',
+    copyButton: '[data-testid="copy-turn-action-button"], button[aria-label="Copy response"]',
 };
 
-const promptInput = (page) => page.locator(SELECTORS.promptInput).first();
+const promptInput = (page) => page.locator(SELECTORS.promptInput).filter({ visible: true }).first();
+
+function findPromptElement(selector) {
+    const visible = (el) =>
+        !!el &&
+        (typeof el.checkVisibility === "function"
+            ? el.checkVisibility()
+            : !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+    return [...document.querySelectorAll(selector)].find((el) => visible(el)) || null;
+}
+
+const FIND_PROMPT_ELEMENT_SOURCE = `(${findPromptElement.toString()})`;
 
 const T0 = Date.now();
 const PHASES = [];
@@ -339,6 +356,14 @@ function printTimings() {
         parts.push(`${PHASES[i][0]}=${((PHASES[i][1] - start) / 1000).toFixed(1)}s`);
     }
     console.log(`>> [timing] ${parts.join(", ")} | total=${((Date.now() - T0) / 1000).toFixed(1)}s`);
+}
+
+function withTimeout(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 const isOnAuthPage = (page) => {
@@ -898,19 +923,36 @@ async function trySend(page, sendButton, { requireVisible = false, force = false
     }
 }
 
+async function waitForSendAccepted(page, countBefore, timeoutMs) {
+    return page
+        .waitForFunction(
+            ({ userSelector, stopSelector, promptSelector, finderSource, before }) => {
+                if (document.querySelectorAll(userSelector).length > before) return true;
+                const stopButton = document.querySelector(stopSelector);
+                if (stopButton && !stopButton.disabled && stopButton.getAttribute("aria-disabled") !== "true") return true;
+                const input = eval(finderSource)(promptSelector);
+                const text = input ? ("value" in input ? input.value : input.innerText || input.textContent || "") : "";
+                return text.trim().length === 0;
+            },
+            {
+                userSelector: SELECTORS.userMessage,
+                stopSelector: SELECTORS.stopButton,
+                promptSelector: SELECTORS.promptInput,
+                finderSource: FIND_PROMPT_ELEMENT_SOURCE,
+                before: countBefore,
+            },
+            { timeout: timeoutMs }
+        )
+        .then(() => true)
+        .catch(() => false);
+}
+
 async function pressSendAndConfirm(page, timeoutMs = 8000) {
     const sendButton = page.locator(SELECTORS.sendButton).first();
     const countBefore = await page.locator(SELECTORS.userMessage).count();
     await trySend(page, sendButton, { requireVisible: true });
 
-    const sentDetected = await page
-        .waitForFunction(
-            ({ selector, before }) => document.querySelectorAll(selector).length > before,
-            { selector: SELECTORS.userMessage, before: countBefore },
-            { timeout: timeoutMs }
-        )
-        .then(() => true)
-        .catch(() => false);
+    const sentDetected = await waitForSendAccepted(page, countBefore, timeoutMs);
 
     if (!sentDetected) {
         console.log(">> Send may have failed, retrying...");
@@ -920,7 +962,7 @@ async function pressSendAndConfirm(page, timeoutMs = 8000) {
             await focusComposer(retryInput);
         }
         await trySend(page, sendButton);
-        await page.waitForTimeout(2000);
+        return waitForSendAccepted(page, countBefore, timeoutMs);
     }
     return sentDetected;
 }
@@ -957,10 +999,10 @@ async function isPromptReady(page) {
     if (!(await input.isVisible().catch(() => false))) return false;
 
     const enabled = await page
-        .evaluate(() => {
-            const el = document.querySelector("#prompt-textarea");
+        .evaluate(({ selector, finderSource }) => {
+            const el = eval(finderSource)(selector);
             return !!el && !el.disabled && !el.readOnly && el.offsetParent !== null;
-        })
+        }, { selector: SELECTORS.promptInput, finderSource: FIND_PROMPT_ELEMENT_SOURCE })
         .catch(() => false);
     if (!enabled) return false;
 
@@ -968,19 +1010,27 @@ async function isPromptReady(page) {
 }
 
 async function waitForChatGPTReady(page, targetUrl = URL) {
+    console.log(">> Opening ChatGPT...");
     await gotoChatGPT(page, targetUrl);
     await page.waitForTimeout(2000);
 
     const deadline = Date.now() + 5 * 60 * 1000;
     let lastNotice = 0;
     while (Date.now() < deadline) {
+        if (await isPromptReady(page)) break;
         await dismissBlockingUI(page);
         if (await isPromptReady(page)) break;
 
-        if (isOnAuthPage(page) && Date.now() - lastNotice > 15000) {
+        if (Date.now() - lastNotice > 15000) {
             lastNotice = Date.now();
             const elapsed = Math.round((Date.now() - (deadline - 5 * 60 * 1000)) / 1000);
-            console.log(`>> Waiting for login... (${elapsed}s) Not logged in in this browser profile. Log in inside the window, or run \`askweb --login\`.`);
+            if (isOnAuthPage(page)) {
+                console.log(`>> Waiting for login... (${elapsed}s) Not logged in in this browser profile. Log in inside the window, or run \`askweb --login\`.`);
+            } else {
+                const pageText = await page.evaluate(() => document.body.innerText.slice(0, 120)).catch(() => "");
+                const summary = pageText.replace(/\s+/g, " ").trim() || "(empty page)";
+                console.log(`>> Waiting for ChatGPT prompt... (${elapsed}s) url=${page.url()} text="${summary}"`);
+            }
         }
         await page.waitForTimeout(1000);
     }
@@ -1007,11 +1057,11 @@ async function waitForChatGPTReady(page, targetUrl = URL) {
 
 async function waitForEnabled(page, input) {
     await page.waitForFunction(
-        (sel) => {
-            const el = document.querySelector(sel);
+        ({ selector, finderSource }) => {
+            const el = eval(finderSource)(selector);
             return el && !el.disabled && !el.readOnly && el.offsetParent !== null;
         },
-        SELECTORS.promptInput,
+        { selector: SELECTORS.promptInput, finderSource: FIND_PROMPT_ELEMENT_SOURCE },
         { timeout: 20000 }
     );
 }
@@ -1221,8 +1271,8 @@ let composerKindLogged = false;
 
 async function prepareComposerProbe(page) {
     return page
-        .evaluate((selector) => {
-            const el = document.querySelector(selector);
+        .evaluate(({ selector, finderSource }) => {
+            const el = eval(finderSource)(selector);
             if (!el) return { ok: false, kind: null };
 
             if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
@@ -1236,22 +1286,22 @@ async function prepareComposerProbe(page) {
             range.selectNodeContents(el);
             selection.addRange(range);
             return { ok: true, kind: `<${el.tagName.toLowerCase()} contenteditable>` };
-        }, SELECTORS.promptInput)
+        }, { selector: SELECTORS.promptInput, finderSource: FIND_PROMPT_ELEMENT_SOURCE })
         .catch(() => ({ ok: false, kind: null }));
 }
 
 async function injectTextareaValue(page, text) {
     return page
         .evaluate(
-            ({ selector, text }) => {
-                const el = document.querySelector(selector);
+            ({ selector, finderSource, text }) => {
+                const el = eval(finderSource)(selector);
                 if (!el || (el.tagName !== "TEXTAREA" && el.tagName !== "INPUT")) return false;
                 const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
                 Object.getOwnPropertyDescriptor(proto, "value").set.call(el, text);
                 el.dispatchEvent(new Event("input", { bubbles: true }));
                 return true;
             },
-            { selector: SELECTORS.promptInput, text }
+            { selector: SELECTORS.promptInput, finderSource: FIND_PROMPT_ELEMENT_SOURCE, text }
         )
         .then((ok) => !!ok)
         .catch(() => false);
@@ -1266,10 +1316,12 @@ async function insertContenteditableChunk(page, chunk) {
 
 async function composerTextLength(page) {
     return page
-        .evaluate((sel) => {
-            const el = document.querySelector(sel);
-            return (el && el.innerText ? el.innerText : "").length;
-        }, SELECTORS.promptInput)
+        .evaluate(({ selector, finderSource }) => {
+            const el = eval(finderSource)(selector);
+            if (!el) return 0;
+            if ("value" in el) return (el.value || "").length;
+            return (el.innerText || el.textContent || "").length;
+        }, { selector: SELECTORS.promptInput, finderSource: FIND_PROMPT_ELEMENT_SOURCE })
         .catch(() => 0);
 }
 
@@ -1305,8 +1357,8 @@ async function pasteIntoComposer(page, input, text) {
     let partialOffset = 0;
 
     if (probe.ok && (probe.kind === "<textarea>" || probe.kind === "<input>")) {
-        injected = await injectTextareaValue(page, text);
-        if (injected) console.log(`>> Pasted ${(text.length / 1024).toFixed(1)} KB via native value setter.`);
+        injected = await input.fill(text).then(() => true).catch(() => injectTextareaValue(page, text));
+        if (injected) console.log(`>> Pasted ${(text.length / 1024).toFixed(1)} KB via textarea fill.`);
     } else if (probe.ok) {
         injected = await pasteViaClipboardKeys(page, input, text);
         if (injected) {
@@ -1455,10 +1507,10 @@ async function composerHasContent(page, needle, minLength) {
 
 async function sendButtonUsable(page) {
     return page
-        .evaluate(() => {
-            const btn = document.querySelector('[data-testid="send-button"]');
+        .evaluate((selector) => {
+            const btn = document.querySelector(selector);
             return !!btn && !btn.disabled && btn.getAttribute("aria-disabled") !== "true";
-        })
+        }, SELECTORS.sendButton)
         .catch(() => false);
 }
 
@@ -1627,7 +1679,7 @@ async function sendChunkedPayload(page, input, plan, finalQuestion) {
     }
 
     console.log(">> All parts delivered, sending TRANSMISSION COMPLETE + question...");
-    const baseline = await page.locator(SELECTORS.assistantMessage).count();
+    const baseline = await page.locator(SELECTORS.assistantMessage).filter({ visible: true }).count();
     const sent = await sendFinaleConfirmed(page, input, buildTransmissionFinale(plan.totalParts, finalQuestion));
     if (!sent) {
         throw new Error(
@@ -1659,7 +1711,7 @@ async function looksLoggedOut(page) {
 async function sendQuestion(page, question, targetUrl = URL) {
     const input = await waitForChatGPTReady(page, targetUrl);
     markPhase("ready");
-    const assistantCountBefore = await page.locator(SELECTORS.assistantMessage).count();
+    const assistantCountBefore = await page.locator(SELECTORS.assistantMessage).filter({ visible: true }).count();
 
     let attached = false;
     const loggedOut = await looksLoggedOut(page);
@@ -1843,7 +1895,7 @@ async function extractAnswerMarkdown(page, answer) {
 }
 
 async function waitForAnswer(page, assistantCountBefore = 0) {
-    const replies = page.locator(SELECTORS.assistantMessage);
+    const replies = page.locator(SELECTORS.assistantMessage).filter({ visible: true });
     const previousLastText = (await replies.last().innerText().catch(() => "")).trim();
 
     const deadline = Date.now() + 3 * 60 * 1000;
@@ -2259,7 +2311,11 @@ async function main() {
 
     const context = await launchBrowser();
     markPhase("browser");
-    await context.grantPermissions(["clipboard-read", "clipboard-write"]).catch(() => {});
+    await withTimeout(
+        context.grantPermissions(["clipboard-read", "clipboard-write"]).catch(() => {}),
+        10000,
+        "Browser permission setup"
+    ).catch((error) => console.log(`>> ${firstLine(error)}; continuing without clipboard permissions.`));
     let shuttingDown = false;
     const shutdown = async () => {
         if (shuttingDown) return;
