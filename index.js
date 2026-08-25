@@ -1408,7 +1408,7 @@ function buildDeliveryPlan(payload) {
 }
 
 function buildTransmissionFinale(total, finalQuestion) {
-    const confirm = `TRANSMISSION COMPLETE - all ${total} part(s) sent (1..${total}). Cross-check every chars= value against what you received and briefly note any missing/truncated part, then answer my question below.`;
+    const confirm = `TRANSMISSION COMPLETE - all ${total} part(s) sent (1..${total}). Now answer my question below.`;
     return finalQuestion ? `${confirm}\n\nMy question: ${finalQuestion}` : confirm;
 }
 
