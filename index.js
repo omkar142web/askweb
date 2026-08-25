@@ -53,7 +53,7 @@ const PROMPT_NAME_RE = /^[-a-z0-9_]+$/i;
 const RESERVED_PROMPT_FLAGS = new Set([
     "o", "output", "login", "continue", "new", "browser", "browser-order", "browser-reset",
     "clear-session", "clear-conversations", "clear-conversation", "help", "h", "version", "v",
-    "prompts", "prompt-create", "append", "prepend",
+    "prompts", "prompt-create", "append", "prepend", "logout",
 ]);
 
 const BUILTIN_PROMPTS = {
@@ -481,6 +481,7 @@ Options:
       --append            Append the answer after existing content in the output file
       --prepend           Prepend the answer before existing content in the output file
       --login             Open ChatGPT to log in and save the session
+      --logout            Open ChatGPT to log out (manual, 10 min)
       --continue          Continue the most recent conversation
       --new               Start a fresh conversation instead of continuing
       --prompts           Open the Prompt Manager (add/edit/rename/delete/view)
@@ -547,6 +548,7 @@ Examples:
 function parseCliArgs(argv = process.argv.slice(2)) {
     const options = {
         login: false,
+        logout: false,
         clearSession: false,
         clearConversations: false,
         clearConversationId: null,
@@ -575,6 +577,11 @@ function parseCliArgs(argv = process.argv.slice(2)) {
 
         if (arg === "--login") {
             options.login = true;
+            continue;
+        }
+
+        if (arg === "--logout") {
+            options.logout = true;
             continue;
         }
 
@@ -2163,6 +2170,13 @@ async function runLoginFlow(page) {
     throw new Error("Login timed out after 10 minutes. Please try again.");
 }
 
+async function runLogoutFlow(page) {
+    console.log(">> Opening ChatGPT. You have up to 10 min to log out or do anything else...");
+    await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.waitForTimeout(10 * 60 * 1000);
+    console.log(">> Time's up. Closing browser.");
+}
+
 function markProfileClean(profileDir) {
     try {
         const prefsPath = path.join(profileDir, "Default", "Preferences");
@@ -2494,6 +2508,17 @@ async function main() {
 
     if (CLI.clearConversations) return clearAllConversations();
     if (CLI.clearConversationId) return clearConversationById(CLI.clearConversationId);
+
+    if (CLI.logout) {
+        const context = await launchBrowser();
+        const page = context.pages()[0] || await context.newPage();
+        try {
+            await runLogoutFlow(page);
+        } finally {
+            await context.close();
+        }
+        return;
+    }
 
     let targetUrl = URL;
     let continuing = null;
