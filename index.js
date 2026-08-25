@@ -53,7 +53,7 @@ const PROMPT_NAME_RE = /^[-a-z0-9_]+$/i;
 const RESERVED_PROMPT_FLAGS = new Set([
     "o", "output", "login", "continue", "new", "browser", "browser-order", "browser-reset",
     "clear-session", "clear-conversations", "clear-conversation", "help", "h", "version", "v",
-    "prompts", "prompt-create",
+    "prompts", "prompt-create", "append", "prepend",
 ]);
 
 const BUILTIN_PROMPTS = {
@@ -386,6 +386,8 @@ Arguments:
 
 Options:
   -o, --output <file>     Save the answer to a file (default: ${DEFAULT_OUTPUT_FILE})
+      --append            Append the answer after existing content in the output file
+      --prepend           Prepend the answer before existing content in the output file
       --login             Open ChatGPT to log in and save the session
       --continue          Continue the most recent conversation
       --new               Start a fresh conversation instead of continuing
@@ -467,6 +469,7 @@ function parseCliArgs(argv = process.argv.slice(2)) {
         promptCreate: null,
         promptsAction: null,
         outputFile: DEFAULT_OUTPUT_FILE,
+        outputMode: "overwrite",
         questionArgs: [],
     };
 
@@ -564,6 +567,22 @@ function parseCliArgs(argv = process.argv.slice(2)) {
             if (!value) throw new Error(`${arg} requires a file path`);
             options.outputFile = stripShellQuotes(value);
             i++;
+            continue;
+        }
+
+        if (arg === "--append") {
+            if (options.outputMode !== "overwrite") {
+                throw new Error("Use either --append or --prepend, not both.");
+            }
+            options.outputMode = "append";
+            continue;
+        }
+
+        if (arg === "--prepend") {
+            if (options.outputMode !== "overwrite") {
+                throw new Error("Use either --append or --prepend, not both.");
+            }
+            options.outputMode = "prepend";
             continue;
         }
 
@@ -2272,7 +2291,21 @@ async function main() {
         const answer = await waitForAnswer(page, assistantCountBefore);
         console.log("\n--- ANSWER ---\n");
         console.log(answer.trim());
-        fs.writeFileSync(CLI.outputFile, answer.trim() + "\n", "utf8");
+        const trimmed = answer.trim();
+        if (CLI.outputMode !== "overwrite") {
+            const existing = fs.existsSync(CLI.outputFile)
+                ? fs.readFileSync(CLI.outputFile, "utf8").replace(/\n+$/, "")
+                : "";
+            fs.writeFileSync(
+                CLI.outputFile,
+                CLI.outputMode === "prepend"
+                    ? trimmed + "\n\n\n" + existing
+                    : existing + "\n\n\n" + trimmed,
+                "utf8"
+            );
+        } else {
+            fs.writeFileSync(CLI.outputFile, trimmed + "\n", "utf8");
+        }
         const conversation = await recordConversation(page, {
             questionText: question.originalText ?? question.text,
             answer: answer.trim(),
