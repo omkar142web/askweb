@@ -317,22 +317,61 @@ async function runPromptManager() {
 const SELECTORS = {
     promptInput: [
         "#mobile-composer-prompt",
+        "#prompt-textarea",
         'textarea[aria-label="Chat with ChatGPT"]',
         'textarea[placeholder="Ask ChatGPT"]',
-        "#prompt-textarea",
         '[contenteditable="true"][role="textbox"]',
-    ].join(", "),
-    sendButton: '[data-testid="send-button"], button[aria-label="Send message"]',
-    stopButton: '[data-testid="stop-button"], button[aria-label="Stop streaming"]',
-    assistantMessage: '[data-message-author-role="assistant"], [class*="_assistantMessage"]:not([class*="Actions"])',
-    userMessage: '[data-message-author-role="user"], [class*="_userMessageGroup"], [class*="_userMessage"]:not([class*="Actions"])',
-    attachButton: '[data-testid="composer-plus-btn"]',
-    copyButton: '[data-testid="copy-turn-action-button"], button[aria-label="Copy response"]',
+    ],
+    sendButton: [
+        '[data-testid="send-button"]',
+        'button[aria-label="Send message"]',
+    ],
+    stopButton: [
+        '[data-testid="stop-button"]',
+        'button[aria-label="Stop streaming"]',
+    ],
+    assistantMessage: [
+        '[data-message-author-role="assistant"]',
+        '[class*="_assistantMessage"]:not([class*="Actions"])',
+    ],
+    userMessage: [
+        '[data-message-author-role="user"]',
+        '[class*="_userMessageGroup"]',
+        '[class*="_userMessage"]:not([class*="Actions"])',
+    ],
+    attachButton: [
+        '[data-testid="composer-plus-btn"]',
+        'button[aria-label="Add files and more"]',
+    ],
+    copyButton: [
+        '[data-testid="copy-turn-action-button"]',
+        'button[aria-label="Copy response"]',
+    ],
+    fileInput: ['input[type="file"]'],
+    blockingDialog: [
+        '[role="dialog"]',
+        '[aria-modal="true"]',
+        '[data-testid*="modal"]',
+        '[class*="modal"]',
+        '[class*="popover"]',
+    ],
+    noAuthModal: ['[data-testid="modal-no-auth-login"]'],
+    dismissButton: ['button', '[role="button"]', 'a'],
+    fileMenuButton: ['[role="menuitem"]', '[role="menu"] button', '[role="dialog"] button'],
+    uploadProgress: [
+        '[role="progressbar"]',
+        '.animate-spin',
+    ],
+    messageBoundary: ['[data-message-author-role]'],
 };
 
-const promptInput = (page) => page.locator(SELECTORS.promptInput).filter({ visible: true }).first();
+const selector = (name) => SELECTORS[name].join(", ");
+const promptInput = (page) => CHATGPT_DOM.visible(page, "promptInput");
+const sendButton = (page) => CHATGPT_DOM.locator(page, "sendButton").first();
+const assistantMessages = (page) => CHATGPT_DOM.visibleAll(page, "assistantMessage");
+const userMessages = (page) => CHATGPT_DOM.locator(page, "userMessage");
 
-function findPromptElement(selector) {
+function firstVisibleElement(selector) {
     const visible = (el) =>
         !!el &&
         (typeof el.checkVisibility === "function"
@@ -341,7 +380,35 @@ function findPromptElement(selector) {
     return [...document.querySelectorAll(selector)].find((el) => visible(el)) || null;
 }
 
-const FIND_PROMPT_ELEMENT_SOURCE = `(${findPromptElement.toString()})`;
+function elementText(el) {
+    if (!el) return "";
+    return "value" in el ? el.value || "" : el.innerText || el.textContent || "";
+}
+
+function isUsableControl(el) {
+    return !!el && !el.disabled && !el.readOnly && el.getAttribute("aria-disabled") !== "true";
+}
+
+const PAGE_DOM_SOURCE = {
+    firstVisibleElement: `(${firstVisibleElement.toString()})`,
+    elementText: `(${elementText.toString()})`,
+    isUsableControl: `(${isUsableControl.toString()})`,
+};
+
+const CHATGPT_DOM = {
+    selector,
+    locator: (page, name) => page.locator(selector(name)),
+    visible: (page, name) => page.locator(selector(name)).filter({ visible: true }).first(),
+    visibleAll: (page, name) => page.locator(selector(name)).filter({ visible: true }),
+    textLocator: (page, pattern) => page.getByText(pattern).first(),
+    pageHelpers: () => PAGE_DOM_SOURCE,
+    promptPayload: () => ({
+        selector: selector("promptInput"),
+        finderSource: PAGE_DOM_SOURCE.firstVisibleElement,
+        textSource: PAGE_DOM_SOURCE.elementText,
+        usableSource: PAGE_DOM_SOURCE.isUsableControl,
+    }),
+};
 
 const T0 = Date.now();
 const PHASES = [];
@@ -814,13 +881,11 @@ function cleanupTempPayloads() {
     }
 }
 
-const NO_AUTH_MODAL = '[data-testid="modal-no-auth-login"]';
-const BLOCKER_SELECTOR = '[role="dialog"], [aria-modal="true"], [data-testid*="modal"], [class*="modal"], [class*="popover"]';
 const UPLOAD_OVERLAY_TEXT = /add\s+anything/i;
 const chipError = (name) => new Error(`attachment chip for "${name}" never appeared`);
 
 async function modalVisible(page) {
-    const modal = page.locator(NO_AUTH_MODAL).first();
+    const modal = CHATGPT_DOM.locator(page, "noAuthModal").first();
     if ((await modal.count()) === 0) return false;
     return modal.isVisible().catch(() => false);
 }
@@ -851,8 +916,8 @@ async function blockingDialogVisible(page) {
                 return false;
             },
             {
-                modalSelector: NO_AUTH_MODAL,
-                blockerSelector: BLOCKER_SELECTOR,
+                modalSelector: selector("noAuthModal"),
+                blockerSelector: selector("blockingDialog"),
                 overlaySource: UPLOAD_OVERLAY_TEXT.source,
             }
         )
@@ -862,7 +927,7 @@ async function blockingDialogVisible(page) {
 async function clickDismissiveButton(page) {
     for (const pattern of POPUP_DISMISS_PATTERNS) {
         const candidates = page
-            .locator('button, [role="button"], a')
+            .locator(selector("dismissButton"))
             .filter({ hasText: pattern.text });
         const total = await candidates.count();
         for (let i = 0; i < total; i++) {
@@ -906,7 +971,7 @@ async function dismissBlockingUI(page) {
         dismissed = true;
 
         await page
-            .locator(NO_AUTH_MODAL)
+            .locator(selector("noAuthModal"))
             .first()
             .waitFor({ state: "hidden", timeout: 8000 })
             .catch(() => {});
@@ -958,19 +1023,19 @@ async function trySend(page, sendButton, { requireVisible = false, force = false
 async function waitForSendAccepted(page, countBefore, timeoutMs) {
     return page
         .waitForFunction(
-            ({ userSelector, stopSelector, promptSelector, finderSource, before }) => {
+            ({ userSelector, stopSelector, promptSelector, finderSource, textSource, usableSource, before }) => {
                 if (document.querySelectorAll(userSelector).length > before) return true;
                 const stopButton = document.querySelector(stopSelector);
-                if (stopButton && !stopButton.disabled && stopButton.getAttribute("aria-disabled") !== "true") return true;
+                if (eval(usableSource)(stopButton)) return true;
                 const input = eval(finderSource)(promptSelector);
-                const text = input ? ("value" in input ? input.value : input.innerText || input.textContent || "") : "";
+                const text = eval(textSource)(input);
                 return text.trim().length === 0;
             },
             {
-                userSelector: SELECTORS.userMessage,
-                stopSelector: SELECTORS.stopButton,
-                promptSelector: SELECTORS.promptInput,
-                finderSource: FIND_PROMPT_ELEMENT_SOURCE,
+                userSelector: selector("userMessage"),
+                stopSelector: selector("stopButton"),
+                promptSelector: selector("promptInput"),
+                ...CHATGPT_DOM.pageHelpers(),
                 before: countBefore,
             },
             { timeout: timeoutMs }
@@ -980,10 +1045,10 @@ async function waitForSendAccepted(page, countBefore, timeoutMs) {
 }
 
 async function pressSendAndConfirm(page, timeoutMs = 8000) {
-    const sendButton = page.locator(SELECTORS.sendButton).first();
-    const countBefore = await page.locator(SELECTORS.userMessage).count();
+    const button = sendButton(page);
+    const countBefore = await userMessages(page).count();
     console.log(">> Clicking send button...");
-    await trySend(page, sendButton, { requireVisible: true });
+    await trySend(page, button, { requireVisible: true });
 
     const sentDetected = await waitForSendAccepted(page, countBefore, timeoutMs);
 
@@ -994,7 +1059,7 @@ async function pressSendAndConfirm(page, timeoutMs = 8000) {
         if ((await retryInput.count()) > 0) {
             await focusComposer(retryInput);
         }
-        await trySend(page, sendButton);
+        await trySend(page, button);
         const retryResult = await waitForSendAccepted(page, countBefore, timeoutMs);
         if (retryResult) console.log(">> Send confirmed on retry.");
         return retryResult;
@@ -1037,10 +1102,10 @@ async function isPromptReady(page) {
     if (!(await input.isVisible().catch(() => false))) return false;
 
     const enabled = await page
-        .evaluate(({ selector, finderSource }) => {
+        .evaluate(({ selector, finderSource, usableSource }) => {
             const el = eval(finderSource)(selector);
-            return !!el && !el.disabled && !el.readOnly && el.offsetParent !== null;
-        }, { selector: SELECTORS.promptInput, finderSource: FIND_PROMPT_ELEMENT_SOURCE })
+            return eval(usableSource)(el) && el.offsetParent !== null;
+        }, CHATGPT_DOM.promptPayload())
         .catch(() => false);
     if (!enabled) return false;
 
@@ -1096,11 +1161,11 @@ async function waitForChatGPTReady(page, targetUrl = URL) {
 
 async function waitForEnabled(page, input) {
     await page.waitForFunction(
-        ({ selector, finderSource }) => {
+        ({ selector, finderSource, usableSource }) => {
             const el = eval(finderSource)(selector);
-            return el && !el.disabled && !el.readOnly && el.offsetParent !== null;
+            return eval(usableSource)(el) && el.offsetParent !== null;
         },
-        { selector: SELECTORS.promptInput, finderSource: FIND_PROMPT_ELEMENT_SOURCE },
+        CHATGPT_DOM.promptPayload(),
         { timeout: 20000 }
     );
 }
@@ -1147,8 +1212,8 @@ async function waitForPromptInput(page) {
 async function attachmentChipProbe(page, fileName) {
     return page
         .evaluate(
-            ({ composerSelector, name }) => {
-                const composer = document.querySelector(composerSelector);
+            ({ composerSelector, progressSelector, finderSource, name }) => {
+                const composer = eval(finderSource)(composerSelector);
                 const region =
                     (composer && composer.closest("form")) ||
                     (composer && composer.parentElement && composer.parentElement.parentElement) ||
@@ -1165,10 +1230,15 @@ async function attachmentChipProbe(page, fileName) {
                         break;
                     }
                 }
-                const uploading = !!region.querySelector('[role="progressbar"], .animate-spin');
+                const uploading = !!region.querySelector(progressSelector);
                 return { present, uploading };
             },
-            { composerSelector: SELECTORS.promptInput, name: fileName }
+            {
+                composerSelector: selector("promptInput"),
+                progressSelector: selector("uploadProgress"),
+                finderSource: CHATGPT_DOM.pageHelpers().firstVisibleElement,
+                name: fileName,
+            }
         )
         .catch(() => ({ present: false, uploading: true }));
 }
@@ -1202,7 +1272,7 @@ async function attachViaDrop(page, files) {
     for (const file of files) {
         const b64 = fs.readFileSync(file.fullPath).toString("base64");
         await page.evaluate(
-            ({ b64, name }) => {
+            ({ b64, name, promptSelector, finderSource }) => {
                 const binary = atob(b64);
                 const bytes = new Uint8Array(binary.length);
                 for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
@@ -1211,14 +1281,19 @@ async function attachViaDrop(page, files) {
                 const file = new File([bytes], name, { type: mimeMap[ext] || "text/plain" });
                 const dt = new DataTransfer();
                 dt.items.add(file);
-                const target = document.querySelector("#prompt-textarea");
+                const target = eval(finderSource)(promptSelector);
                 if (target) {
                     for (const type of ["dragenter", "dragover", "drop"]) {
                         target.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt }));
                     }
                 }
             },
-            { b64, name: file.name }
+            {
+                b64,
+                name: file.name,
+                promptSelector: selector("promptInput"),
+                finderSource: CHATGPT_DOM.pageHelpers().firstVisibleElement,
+            }
         );
         const attached = await waitForAttachmentChip(page, file.name);
         if (!attached) throw new Error(`drop did not create attachment chip for "${file.name}"`);
@@ -1229,7 +1304,7 @@ async function attachViaDrop(page, files) {
 async function attachViaChooser(page, files) {
     console.log(">> Attempting file chooser attach...");
     const chooserPromise = page.waitForEvent("filechooser", { timeout: 6000 });
-    await page.locator(SELECTORS.attachButton).first().click();
+    await CHATGPT_DOM.locator(page, "attachButton").first().click();
 
     let chooser;
     try {
@@ -1237,7 +1312,7 @@ async function attachViaChooser(page, files) {
     } catch {
         console.log(">> No file chooser appeared, looking for menu item...");
         const menuItem = page
-            .locator('[role="menuitem"], [role="menu"] button, [role="dialog"] button')
+            .locator(selector("fileMenuButton"))
             .filter({ hasText: /file|upload|computer|photos/i })
             .first();
         await menuItem.click({ timeout: 4000 });
@@ -1254,7 +1329,7 @@ async function attachViaChooser(page, files) {
 }
 
 async function attachViaFileInput(page, files) {
-    const inputs = page.locator('input[type="file"]');
+    const inputs = CHATGPT_DOM.locator(page, "fileInput");
     const count = await inputs.count();
     if (count === 0) throw new Error("no input[type=file] in DOM");
     console.log(`>> Found ${count} file input(s), attempting file-input attach...`);
@@ -1333,7 +1408,7 @@ async function prepareComposerProbe(page) {
             range.selectNodeContents(el);
             selection.addRange(range);
             return { ok: true, kind: `<${el.tagName.toLowerCase()} contenteditable>` };
-        }, { selector: SELECTORS.promptInput, finderSource: FIND_PROMPT_ELEMENT_SOURCE })
+        }, CHATGPT_DOM.promptPayload())
         .catch(() => ({ ok: false, kind: null }));
 }
 
@@ -1348,7 +1423,7 @@ async function injectTextareaValue(page, text) {
                 el.dispatchEvent(new Event("input", { bubbles: true }));
                 return true;
             },
-            { selector: SELECTORS.promptInput, finderSource: FIND_PROMPT_ELEMENT_SOURCE, text }
+            { ...CHATGPT_DOM.promptPayload(), text }
         )
         .then((ok) => !!ok)
         .catch(() => false);
@@ -1363,12 +1438,11 @@ async function insertContenteditableChunk(page, chunk) {
 
 async function composerTextLength(page) {
     return page
-        .evaluate(({ selector, finderSource }) => {
+        .evaluate(({ selector, finderSource, textSource }) => {
             const el = eval(finderSource)(selector);
             if (!el) return 0;
-            if ("value" in el) return (el.value || "").length;
-            return (el.innerText || el.textContent || "").length;
-        }, { selector: SELECTORS.promptInput, finderSource: FIND_PROMPT_ELEMENT_SOURCE })
+            return eval(textSource)(el).length;
+        }, CHATGPT_DOM.promptPayload())
         .catch(() => 0);
 }
 
@@ -1529,7 +1603,7 @@ function buildTransmissionFinale(total, finalQuestion) {
 }
 
 async function waitForGenerationEnd(page, timeoutMs = 10 * 60 * 1000) {
-    const stopButton = page.locator(SELECTORS.stopButton).first();
+    const stopButton = CHATGPT_DOM.locator(page, "stopButton").first();
     const deadline = Date.now() + timeoutMs;
     let noticed = false;
     while (Date.now() < deadline) {
@@ -1560,7 +1634,7 @@ async function sendButtonUsable(page) {
         .evaluate((selector) => {
             const btn = document.querySelector(selector);
             return !!btn && !btn.disabled && btn.getAttribute("aria-disabled") !== "true";
-        }, SELECTORS.sendButton)
+        }, selector("sendButton"))
         .catch(() => false);
 }
 
@@ -1574,7 +1648,7 @@ async function transcriptContainsCloseTag(page, closeTag) {
                 }
                 return false;
             },
-            { selector: SELECTORS.userMessage, needle: closeTag }
+            { selector: selector("userMessage"), needle: closeTag }
         )
         .catch(() => false);
 }
@@ -1591,7 +1665,7 @@ async function waitForPartLanding(page, closeTag, timeoutMs = 30000) {
                     const last = msgs[msgs.length - 1];
                     return (((last && (last.innerText || "")) || "") + "").trim().slice(0, 120);
                 },
-                SELECTORS.userMessage
+                selector("userMessage")
             )
             .catch(() => "");
         await page.waitForTimeout(600);
@@ -1657,7 +1731,7 @@ async function transmitPart(page, input, part, index, total) {
             await waitForGenerationEnd(page);
         }
 
-        await trySend(page, page.locator(SELECTORS.sendButton).first(), { requireVisible: true });
+        await trySend(page, sendButton(page), { requireVisible: true });
 
         const landing = await waitForPartLanding(page, closeTag);
         if (landing.ok) {
@@ -1705,13 +1779,13 @@ async function sendFinaleConfirmed(page, input, text, attempts = 3) {
         await waitForGenerationEnd(page);
         await typePrompt(page, input, text);
 
-        const userBefore = await page.locator(SELECTORS.userMessage).count();
-        await trySend(page, page.locator(SELECTORS.sendButton).first(), { requireVisible: true });
+        const userBefore = await userMessages(page).count();
+        await trySend(page, sendButton(page), { requireVisible: true });
 
         const deadline = Date.now() + 20000;
         let elapsed = 0;
         while ((elapsed = 20000 - (deadline - Date.now())) < 20000) {
-            const users = await page.locator(SELECTORS.userMessage).count();
+            const users = await userMessages(page).count();
             if (users > userBefore) return true;
             if (elapsed > 1200 && (await composerEmpty(page))) return true;
             await page.waitForTimeout(600);
@@ -1731,7 +1805,7 @@ async function sendChunkedPayload(page, input, plan, finalQuestion) {
     }
 
     console.log(">> All parts delivered, sending TRANSMISSION COMPLETE + question...");
-    const baseline = await page.locator(SELECTORS.assistantMessage).filter({ visible: true }).count();
+    const baseline = await assistantMessages(page).count();
     const sent = await sendFinaleConfirmed(page, input, buildTransmissionFinale(plan.totalParts, finalQuestion));
     if (!sent) {
         throw new Error(
@@ -1764,7 +1838,7 @@ async function looksLoggedOut(page) {
 async function sendQuestion(page, question, targetUrl = URL) {
     const input = await waitForChatGPTReady(page, targetUrl);
     markPhase("ready");
-    const assistantCountBefore = await page.locator(SELECTORS.assistantMessage).filter({ visible: true }).count();
+    const assistantCountBefore = await assistantMessages(page).count();
 
     let attached = false;
     const loggedOut = await looksLoggedOut(page);
@@ -1900,7 +1974,7 @@ async function sendQuestion(page, question, targetUrl = URL) {
                     const last = msgs[msgs.length - 1];
                     return !!last && (last.innerText || "").toLowerCase().includes(name.toLowerCase());
                 },
-                { selector: SELECTORS.userMessage, name: stagedAttachmentName }
+                { selector: selector("userMessage"), name: stagedAttachmentName }
             )
             .catch(() => true);
         if (!sentWithFile) {
@@ -1914,7 +1988,7 @@ async function sendQuestion(page, question, targetUrl = URL) {
 async function findCopyButton(page, answer) {
     const parent = answer.locator("xpath=..");
     const tiers = [
-        SELECTORS.copyButton,
+        selector("copyButton"),
         'button[aria-label*="copy" i]:not([aria-label*="code" i]):not([aria-label*="image" i])',
     ];
     for (const selector of tiers) {
@@ -1949,8 +2023,13 @@ async function extractAnswerMarkdown(page, answer) {
         try {
             await copyButton.click({ timeout: 3000, force: true });
         } catch {
-            console.log(">> Copy button force-click also failed.");
-            return null;
+            console.log(">> Copy button force-click failed, retrying with DOM click...");
+            try {
+                await copyButton.evaluate((button) => button.click());
+            } catch {
+                console.log(">> Copy button DOM click also failed.");
+                return null;
+            }
         }
     }
 
@@ -1966,7 +2045,7 @@ async function extractAnswerMarkdown(page, answer) {
 
 async function waitForAnswer(page, assistantCountBefore = 0) {
     console.log(">> Waiting for answer to appear...");
-    const replies = page.locator(SELECTORS.assistantMessage).filter({ visible: true });
+    const replies = assistantMessages(page);
     const previousLastText = (await replies.last().innerText().catch(() => "")).trim();
 
     const deadline = Date.now() + 3 * 60 * 1000;
@@ -1975,7 +2054,7 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
     let lastProgressLog = 0;
 
     while (Date.now() < deadline) {
-        const stopVisible = await page.locator(SELECTORS.stopButton).first().isVisible().catch(() => false);
+        const stopVisible = await CHATGPT_DOM.locator(page, "stopButton").first().isVisible().catch(() => false);
         if (stopVisible && !sawGeneration) {
             sawGeneration = true;
             console.log(">> Generation started (stop button visible).");
@@ -2017,7 +2096,7 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
         await page.waitForTimeout(POLL_MS);
         totalPolls += 1;
 
-        const stopButton = page.locator(SELECTORS.stopButton).first();
+        const stopButton = CHATGPT_DOM.locator(page, "stopButton").first();
         const stopVisible = await stopButton.isVisible().catch(() => false);
 
         const text = await answer.innerText().catch(() => "");
@@ -2040,6 +2119,7 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
     } else {
         console.log(">> Copy button unavailable, falling back to rendered text.");
         markdown = await answer.innerText();
+        await page.evaluate((text) => navigator.clipboard.writeText(text), markdown).catch(() => {});
     }
     markPhase("extract");
     return markdown;
@@ -2073,7 +2153,8 @@ async function runLoginFlow(page) {
 
         if (isOnAuthPage(page)) {
             const bodyText = await page.evaluate(() => document.body.innerText).catch(() => "");
-            if (/welcome back|sign.in|log.in/i.test(bodyText) && !bodyText.includes("#prompt-textarea")) {
+            const hasPrompt = (await promptInput(page).count()) > 0;
+            if (/welcome back|sign.in|log.in/i.test(bodyText) && !hasPrompt) {
                 continue;
             }
         }
