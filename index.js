@@ -698,12 +698,15 @@ function parseQuestion(args = CLI.questionArgs) {
                 );
             }
             text = preset.prompt.split(/\{\{\s*input\s*\}\}/).join(extra);
+            console.log(
+                `>> Using prompt preset "--${presetName}"${preset.description ? ` (${preset.description})` : ""}. Substituted {{input}} with user text (${extra.length} chars).`
+            );
         } else {
             text = extra ? `${preset.prompt}\n\nExtra focus: ${extra}` : preset.prompt;
+            console.log(
+                `>> Using prompt preset "--${presetName}"${preset.description ? ` (${preset.description})` : ""}.${extra ? ` Appended extra focus text (${extra.length} chars).` : ""}`
+            );
         }
-        console.log(
-            `>> Using prompt preset "--${presetName}"${preset.description ? ` (${preset.description})` : ""}.`
-        );
     } else {
         text = extra || DEFAULT_QUESTION;
     }
@@ -729,7 +732,10 @@ function looksLikeExistingFile(value) {
 }
 
 function loadFiles(fileRefs) {
-    return fileRefs.map((ref) => {
+    if (fileRefs.length > 0) {
+        console.log(`>> Loading ${fileRefs.length} file(s) from disk...`);
+    }
+    const results = fileRefs.map((ref) => {
         const fullPath = path.resolve(ref);
         if (!fs.existsSync(fullPath)) {
             throw new Error(`File not found: ${fullPath}`);
@@ -740,12 +746,22 @@ function loadFiles(fileRefs) {
         let content = isText ? buffer.toString("utf8") : buffer.toString("base64");
         const truncated = content.length > MAX_FILE_CHARS;
         if (truncated) {
-            console.log(`>> ${path.basename(fullPath)} exceeds ${MAX_FILE_CHARS} chars, truncated.`);
             content = content.slice(0, MAX_FILE_CHARS);
         }
+        const sizeKB = (buffer.length / 1024).toFixed(1);
+        console.log(
+            `>> Loaded "${path.basename(fullPath)}" (${isText ? "text" : "binary"}, ${sizeKB} KB` +
+                (truncated ? `, truncated to ${MAX_FILE_CHARS} chars` : "") +
+                `).`
+        );
 
         return { name: path.basename(fullPath), fullPath, isText, content, truncated };
     });
+    if (fileRefs.length > 1) {
+        const totalKB = (results.reduce((sum, file) => sum + file.content.length, 0) / 1024).toFixed(1);
+        console.log(`>> Total: ${results.length} file(s), ${totalKB} KB.`);
+    }
+    return results;
 }
 
 function shouldPasteFiles(files) {
@@ -780,15 +796,21 @@ function stageTempPayload(payload) {
         const file = path.join(dir, "payload.md");
         fs.writeFileSync(file, payload, "utf8");
         ACTIVE_TEMP_FILES.push(dir);
+        console.log(`>> Temp payload staged: ${file} (${(payload.length / 1024).toFixed(1)} KB).`);
         return { name: "payload.md", fullPath: file, isText: true, content: payload, truncated: false };
-    } catch {
+    } catch (error) {
+        console.log(`>> Failed to stage temp payload: ${error.message}`);
         return null;
     }
 }
 
 function cleanupTempPayloads() {
+    const count = ACTIVE_TEMP_FILES.length;
     for (const dir of ACTIVE_TEMP_FILES.splice(0)) {
         fs.rmSync(dir, { recursive: true, force: true });
+    }
+    if (count > 0) {
+        console.log(`>> Cleaned up ${count} temp payload dir(s).`);
     }
 }
 
@@ -859,7 +881,10 @@ async function clickDismissiveButton(page) {
 }
 
 async function dismissBlockingUI(page) {
-    if (!(await blockingDialogVisible(page))) return false;
+    if (!(await blockingDialogVisible(page))) {
+        console.log(">> No blocking UI detected.");
+        return false;
+    }
 
     const sawNoAuthModal = await modalVisible(page);
     const sawUploadOverlay = await uploadOverlayVisible(page);
@@ -868,10 +893,16 @@ async function dismissBlockingUI(page) {
     let dismissed = false;
 
     for (let attempt = 0; attempt < 5; attempt++) {
-        if (!(await blockingDialogVisible(page))) break;
+        if (!(await blockingDialogVisible(page))) {
+            console.log(">> Blocking UI cleared after dismiss attempts.");
+            break;
+        }
 
         const clicked = await clickDismissiveButton(page);
-        if (!clicked) break;
+        if (!clicked) {
+            console.log(">> No matching dismissive button found, stopping button attempts.");
+            break;
+        }
         dismissed = true;
 
         await page
@@ -883,6 +914,7 @@ async function dismissBlockingUI(page) {
     }
 
     if (await blockingDialogVisible(page)) {
+        console.log(">> Blocking UI still present, pressing Escape as fallback...");
         await page.keyboard.press("Escape");
         await page.waitForTimeout(1000);
         dismissed = true;
@@ -950,6 +982,7 @@ async function waitForSendAccepted(page, countBefore, timeoutMs) {
 async function pressSendAndConfirm(page, timeoutMs = 8000) {
     const sendButton = page.locator(SELECTORS.sendButton).first();
     const countBefore = await page.locator(SELECTORS.userMessage).count();
+    console.log(">> Clicking send button...");
     await trySend(page, sendButton, { requireVisible: true });
 
     const sentDetected = await waitForSendAccepted(page, countBefore, timeoutMs);
@@ -962,8 +995,11 @@ async function pressSendAndConfirm(page, timeoutMs = 8000) {
             await focusComposer(retryInput);
         }
         await trySend(page, sendButton);
-        return waitForSendAccepted(page, countBefore, timeoutMs);
+        const retryResult = await waitForSendAccepted(page, countBefore, timeoutMs);
+        if (retryResult) console.log(">> Send confirmed on retry.");
+        return retryResult;
     }
+    console.log(">> Send confirmed.");
     return sentDetected;
 }
 
@@ -981,7 +1017,9 @@ async function gotoChatGPT(page, targetUrl = URL) {
     let lastError;
     for (let attempt = 1; attempt <= 3; attempt++) {
         try {
+            console.log(`>> Navigating to ${targetUrl} (attempt ${attempt}/3)...`);
             await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+            console.log(`>> Navigation complete (${page.url()}).`);
             return;
         } catch (error) {
             lastError = error;
@@ -1040,6 +1078,7 @@ async function waitForChatGPTReady(page, targetUrl = URL) {
         throw new Error(`Prompt input never became usable at ${page.url()}. Page text: ${pageText.replace(/\s+/g, " ").trim() || "(empty)"}. Run \`node index.js --login\` to log in manually.`);
     }
 
+    console.log(">> Prompt input detected, focusing...");
     const input = promptInput(page);
     try {
         await input.click({ timeout: 10000, force: true });
@@ -1158,6 +1197,7 @@ async function waitForAttachmentChip(page, firstName) {
 }
 
 async function attachViaDrop(page, files) {
+    console.log(`>> Attempting drag-and-drop attach for ${files.length} file(s)...`);
     await promptInput(page).click();
     for (const file of files) {
         const b64 = fs.readFileSync(file.fullPath).toString("base64");
@@ -1182,10 +1222,12 @@ async function attachViaDrop(page, files) {
         );
         const attached = await waitForAttachmentChip(page, file.name);
         if (!attached) throw new Error(`drop did not create attachment chip for "${file.name}"`);
+        console.log(`>> Drag-and-drop attach succeeded for "${file.name}".`);
     }
 }
 
 async function attachViaChooser(page, files) {
+    console.log(">> Attempting file chooser attach...");
     const chooserPromise = page.waitForEvent("filechooser", { timeout: 6000 });
     await page.locator(SELECTORS.attachButton).first().click();
 
@@ -1193,6 +1235,7 @@ async function attachViaChooser(page, files) {
     try {
         chooser = await chooserPromise;
     } catch {
+        console.log(">> No file chooser appeared, looking for menu item...");
         const menuItem = page
             .locator('[role="menuitem"], [role="menu"] button, [role="dialog"] button')
             .filter({ hasText: /file|upload|computer|photos/i })
@@ -1201,17 +1244,20 @@ async function attachViaChooser(page, files) {
         chooser = await page.waitForEvent("filechooser", { timeout: 6000 });
     }
 
+    console.log(`>> Setting ${files.length} file(s) via chooser...`);
     await chooser.setFiles(files.map((file) => file.fullPath));
 
     if (!(await waitForAttachmentChip(page, files[0].name))) {
         throw chipError(files[0].name);
     }
+    console.log(`>> Chooser attach succeeded for "${files[0].name}".`);
 }
 
 async function attachViaFileInput(page, files) {
     const inputs = page.locator('input[type="file"]');
     const count = await inputs.count();
     if (count === 0) throw new Error("no input[type=file] in DOM");
+    console.log(`>> Found ${count} file input(s), attempting file-input attach...`);
 
     let lastError;
     for (let i = count - 1; i >= 0; i--) {
@@ -1220,6 +1266,7 @@ async function attachViaFileInput(page, files) {
             if (!(await waitForAttachmentChip(page, files[0].name))) {
                 throw chipError(files[0].name);
             }
+            console.log(`>> File-input attach succeeded for "${files[0].name}".`);
             return;
         } catch (error) {
             lastError = error;
@@ -1467,6 +1514,9 @@ function resolveChunkSizeOverride() {
 
 function buildDeliveryPlan(payload) {
     const manualChunkSize = resolveChunkSizeOverride();
+    if (manualChunkSize) {
+        console.log(`>> Using manual chunk size override: ${manualChunkSize} chars (${(manualChunkSize / 1024).toFixed(1)} KB).`);
+    }
     return {
         plan: manualChunkSize ? buildTransmissionPlan(payload, manualChunkSize) : buildMinimalTransmissionPlan(payload),
         manualChunkSize,
@@ -1651,6 +1701,7 @@ async function sendFinaleConfirmed(page, input, text, attempts = 3) {
     for (let attempt = 1; attempt <= attempts; attempt++) {
         // Sending while a reply is still generating is a guaranteed no-op (button is a stop button),
         // which used to burn the whole confirmation timeout on attempt 1 every single time.
+        console.log(`>> Sending TRANSMISSION COMPLETE (attempt ${attempt}/${attempts})...`);
         await waitForGenerationEnd(page);
         await typePrompt(page, input, text);
 
@@ -1673,6 +1724,7 @@ async function sendFinaleConfirmed(page, input, text, attempts = 3) {
 }
 
 async function sendChunkedPayload(page, input, plan, finalQuestion) {
+    console.log(`>> Starting chunked transmission of ${plan.totalParts} part(s)...`);
     for (let i = 0; i < plan.totalParts; i++) {
         if (i > 0) await page.waitForTimeout(1500);
         await transmitPart(page, input, plan.parts[i], i + 1, plan.totalParts);
@@ -1686,6 +1738,7 @@ async function sendChunkedPayload(page, input, plan, finalQuestion) {
             "TRANSMISSION COMPLETE could not be delivered after retries - the session likely stopped accepting messages. Check the browser window."
         );
     }
+    console.log(">> TRANSMISSION COMPLETE confirmed.");
     return baseline;
 }
 
@@ -1715,6 +1768,9 @@ async function sendQuestion(page, question, targetUrl = URL) {
 
     let attached = false;
     const loggedOut = await looksLoggedOut(page);
+    if (loggedOut) {
+        console.log(">> Detected: not logged in. Upload features will be limited.");
+    }
     if (question.files.length > 0) {
         console.log(`>> Loaded ${question.files.length} file(s): ${question.files.map((file) => file.name).join(", ")}`);
         if (shouldPasteFiles(question.files)) {
@@ -1865,46 +1921,65 @@ async function findCopyButton(page, answer) {
         for (const scope of [answer, parent, page]) {
             const button = scope.locator(selector).last();
             if ((await button.count()) > 0 && (await button.isVisible().catch(() => false))) {
+                console.log(`>> Copy button found (scope: ${scope === answer ? "answer" : scope === parent ? "parent" : "page"}).`);
                 return button;
             }
         }
     }
+    console.log(">> No visible copy button found in any tier.");
     return null;
 }
 
 async function extractAnswerMarkdown(page, answer) {
+    console.log(">> Clearing clipboard for answer extraction...");
     await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => {});
 
     const copyButton = await findCopyButton(page, answer);
-    if (!copyButton) return null;
+    if (!copyButton) {
+        console.log(">> Copy button not found in answer block.");
+        return null;
+    }
+    console.log(">> Copy button found, clicking...");
 
     await answer.hover({ timeout: 2000 }).catch(() => {});
     try {
         await copyButton.click({ timeout: 5000 });
     } catch {
+        console.log(">> Copy button click failed, retrying with force...");
         try {
             await copyButton.click({ timeout: 3000, force: true });
         } catch {
+            console.log(">> Copy button force-click also failed.");
             return null;
         }
     }
 
     await page.waitForTimeout(400);
     const text = await page.evaluate(() => navigator.clipboard.readText()).catch(() => "");
+    if (typeof text === "string" && text.trim()) {
+        console.log(`>> Clipboard read successful (${text.length} chars).`);
+    } else {
+        console.log(">> Clipboard read returned empty content.");
+    }
     return typeof text === "string" && text.trim() ? text : null;
 }
 
 async function waitForAnswer(page, assistantCountBefore = 0) {
+    console.log(">> Waiting for answer to appear...");
     const replies = page.locator(SELECTORS.assistantMessage).filter({ visible: true });
     const previousLastText = (await replies.last().innerText().catch(() => "")).trim();
 
     const deadline = Date.now() + 3 * 60 * 1000;
     let sawGeneration = false;
     let ready = false;
+    let lastProgressLog = 0;
 
     while (Date.now() < deadline) {
         const stopVisible = await page.locator(SELECTORS.stopButton).first().isVisible().catch(() => false);
-        if (stopVisible) sawGeneration = true;
+        if (stopVisible && !sawGeneration) {
+            sawGeneration = true;
+            console.log(">> Generation started (stop button visible).");
+        }
 
         const count = await replies.count();
         const grew = count > assistantCountBefore;
@@ -1912,7 +1987,17 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
 
         if (grew || ((sawGeneration || (await composerEmpty(page))) && !stopVisible && newText && newText !== previousLastText)) {
             ready = true;
+            const elapsed = ((Date.now() - (deadline - 3 * 60 * 1000)) / 1000).toFixed(1);
+            console.log(`>> Answer appeared after ${elapsed}s (replies: ${count}, text length: ${newText.length}).`);
             break;
+        }
+
+        const now = Date.now();
+        if (now - lastProgressLog > 10000) {
+            lastProgressLog = now;
+            const elapsed = Math.round((now - (deadline - 3 * 60 * 1000)) / 1000);
+            const status = sawGeneration ? "generation in progress" : "waiting for response";
+            console.log(`>> Still waiting for answer... (${elapsed}s elapsed, ${status}, replies: ${count}).`);
         }
         await page.waitForTimeout(700);
     }
@@ -1921,13 +2006,16 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
         throw new Error("No answer appeared - the final message may not have been accepted. Check the browser window.");
     }
 
+    console.log(">> Answer received, waiting for generation to stabilize...");
     let stableCount = 0;
     let prevLength = -1;
     const answer = replies.last();
     await answer.waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
 
+    let totalPolls = 0;
     while (stableCount < STABLE_POLLS_REQUIRED) {
         await page.waitForTimeout(POLL_MS);
+        totalPolls += 1;
 
         const stopButton = page.locator(SELECTORS.stopButton).first();
         const stopVisible = await stopButton.isVisible().catch(() => false);
@@ -1938,12 +2026,17 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
         const unchanged = lastLength === prevLength && lastLength > 0 && !stopVisible;
         stableCount = unchanged ? stableCount + 1 : 0;
         prevLength = lastLength;
+
+        if (!unchanged && totalPolls > 0 && totalPolls % 5 === 0) {
+            console.log(`>> Still generating... (poll ${totalPolls}, current length: ${lastLength} chars, stop visible: ${stopVisible}).`);
+        }
     }
 
+    console.log(`>> Generation stable (${totalPolls} polls, final length: ${prevLength} chars).`);
     markPhase("generate");
     let markdown = await extractAnswerMarkdown(page, answer);
     if (markdown) {
-        console.log(">> Raw Markdown captured via copy button.");
+        console.log(`>> Raw Markdown captured via copy button (${markdown.length} chars).`);
     } else {
         console.log(">> Copy button unavailable, falling back to rendered text.");
         markdown = await answer.innerText();
@@ -1997,7 +2090,10 @@ function markProfileClean(profileDir) {
         prefs.profile.exit_type = "Normal";
         prefs.profile.exited_cleanly = true;
         fs.writeFileSync(prefsPath, JSON.stringify(prefs));
-    } catch {}
+        console.log(`>> Browser profile marked clean: ${profileDir}`);
+    } catch {
+        console.log(`>> Could not mark profile clean (may not exist yet): ${profileDir}`);
+    }
 }
 
 function clearSessionData(profileDir) {
@@ -2005,13 +2101,20 @@ function clearSessionData(profileDir) {
         const localStoragePath = path.join(profileDir, "Default", "Local Storage", "leveldb");
         if (fs.existsSync(localStoragePath)) {
             const files = fs.readdirSync(localStoragePath).filter((f) => f.endsWith(".log") || f.endsWith(".ldb"));
+            let deleted = 0;
             for (const file of files) {
                 try {
                     fs.unlinkSync(path.join(localStoragePath, file));
+                    deleted += 1;
                 } catch {}
             }
+            console.log(`>> Cleared ${deleted} session file(s) from ${localStoragePath}.`);
+        } else {
+            console.log(`>> No local storage found at ${localStoragePath}, nothing to clear.`);
         }
-    } catch {}
+    } catch (error) {
+        console.log(`>> Could not clear session data: ${error.message}`);
+    }
 }
 
 function wantsClearSession() {
@@ -2021,21 +2124,27 @@ function wantsClearSession() {
 function loadConversations() {
     try {
         const data = JSON.parse(fs.readFileSync(CONVERSATIONS_FILE, "utf8"));
+        const count = Array.isArray(data.conversations) ? data.conversations.length : 0;
+        console.log(`>> Loaded ${count} saved conversation(s) from ${CONVERSATIONS_FILE}.`);
         return Array.isArray(data.conversations) ? data : { conversations: [] };
     } catch {
+        console.log(">> No saved conversation history found, starting fresh.");
         return { conversations: [] };
     }
 }
 
 function saveConversations(data) {
     fs.writeFileSync(CONVERSATIONS_FILE, JSON.stringify(data, null, 2), "utf8");
+    console.log(`>> Saved ${data.conversations.length} conversation(s) to ${CONVERSATIONS_FILE}.`);
 }
 
 function clearAllConversations() {
     try {
         fs.unlinkSync(CONVERSATIONS_FILE);
-    } catch {}
-    console.log(`>> Cleared all saved conversation history (${CONVERSATIONS_FILE}).`);
+        console.log(`>> Cleared all saved conversation history (${CONVERSATIONS_FILE}).`);
+    } catch {
+        console.log(`>> No conversation history file to clear (${CONVERSATIONS_FILE}).`);
+    }
 }
 
 function clearConversationById(idPrefix) {
@@ -2051,7 +2160,7 @@ function clearConversationById(idPrefix) {
     const matchedIds = new Set(matches.map((conversation) => conversation.id));
     data.conversations = data.conversations.filter((conversation) => !matchedIds.has(conversation.id));
     saveConversations(data);
-    console.log(`>> Removed ${matches.length} saved conversation(s):`);
+    console.log(`>> Removed ${matches.length} saved conversation(s) (${data.conversations.length} remaining):`);
     for (const conversation of matches) {
         console.log(`   - ${conversation.id}${conversation.title ? ` ("${conversation.title}")` : ""}`);
     }
@@ -2084,6 +2193,7 @@ function buildContinuationPrompt(history, newQuestion) {
 
 async function recordConversation(page, run) {
     try {
+        console.log(">> Recording conversation to local history...");
         let match = page.url().match(CONVERSATION_URL_RE);
         const deadline = Date.now() + 2000;
         while (!match && Date.now() < deadline) {
@@ -2112,6 +2222,7 @@ async function recordConversation(page, run) {
             ...data.conversations.filter((conversation) => conversation.id !== entry.id),
         ].slice(0, MAX_SAVED_CONVERSATIONS);
         saveConversations(data);
+        console.log(`>> Conversation recorded (id: ${entry.id}, title: "${entry.title}", ${entry.messages.length} messages).`);
         return entry;
     } catch (error) {
         console.warn(`>> Failed to save conversation history locally: ${firstLine(error)}`);
@@ -2121,14 +2232,18 @@ async function recordConversation(page, run) {
 
 function loadBrowserPrefs() {
     try {
-        return JSON.parse(fs.readFileSync(PREFS_FILE, "utf8"));
+        const prefs = JSON.parse(fs.readFileSync(PREFS_FILE, "utf8"));
+        console.log(`>> Loaded browser preferences (default: ${prefs.defaultBrowser || "auto"}).`);
+        return prefs;
     } catch {
+        console.log(">> No browser preferences file found, using defaults.");
         return {};
     }
 }
 
 function saveBrowserPrefs(prefs) {
     fs.writeFileSync(PREFS_FILE, JSON.stringify(prefs, null, 2), "utf8");
+    console.log(`>> Browser preferences saved to ${PREFS_FILE}.`);
 }
 
 function browserLabel(browser) {
@@ -2153,8 +2268,11 @@ function orderedBrowsers() {
 
     const preferred = prefs.defaultBrowser ? browserByName(prefs.defaultBrowser) : null;
     if (preferred) {
-        return [preferred, ...list.filter((browser) => browser !== preferred)];
+        const ordered = [preferred, ...list.filter((browser) => browser !== preferred)];
+        console.log(`>> Browser order resolved: ${ordered.map((b) => browserLabel(b)).join(", ")} (preferred: ${browserLabel(preferred)}).`);
+        return ordered;
     }
+    console.log(`>> Browser order resolved: ${list.map((b) => browserLabel(b)).join(", ")}.`);
     return list;
 }
 
@@ -2235,7 +2353,10 @@ async function configureBrowserOrder() {
 function resetBrowserPreferences() {
     try {
         fs.unlinkSync(PREFS_FILE);
-    } catch {}
+        console.log(`>> Deleted browser preferences file: ${PREFS_FILE}`);
+    } catch {
+        console.log(`>> No browser preferences file to delete (${PREFS_FILE}).`);
+    }
     console.log("✓ Browser preferences reset to automatic (Chrome first).");
 }
 
@@ -2300,9 +2421,13 @@ async function main() {
         if (!continuing) {
             throw new Error("No saved conversation found. Run a question first, then use --continue.");
         }
+        console.log(`>> Resuming conversation: "${continuing.title || continuing.id}" (${continuing.messages?.length || 0} messages).`);
     }
 
     const loginOnly = wantsLogin();
+    if (loginOnly) {
+        console.log(">> Login mode: launching browser for manual login...");
+    }
     const question = loginOnly ? null : loadQuestion();
     if (question && continuing) {
         question.originalText = question.text;
@@ -2311,6 +2436,7 @@ async function main() {
 
     const context = await launchBrowser();
     markPhase("browser");
+    console.log(">> Granting clipboard permissions...");
     await withTimeout(
         context.grantPermissions(["clipboard-read", "clipboard-write"]).catch(() => {}),
         10000,
@@ -2329,6 +2455,7 @@ async function main() {
     process.on("SIGTERM", shutdown);
 
     const page = context.pages()[0] || await context.newPage();
+    console.log(`>> Page ready (${page.url()}).`);
     for (const extra of context.pages()) {
         if (extra !== page) await extra.close().catch(() => {});
     }
@@ -2348,6 +2475,7 @@ async function main() {
         console.log("\n--- ANSWER ---\n");
         console.log(answer.trim());
         const trimmed = answer.trim();
+        console.log(`>> Writing answer to ${CLI.outputFile} (${trimmed.length} chars, mode: ${CLI.outputMode})...`);
         if (CLI.outputMode !== "overwrite") {
             const existing = fs.existsSync(CLI.outputFile)
                 ? fs.readFileSync(CLI.outputFile, "utf8").replace(/\n+$/, "")
