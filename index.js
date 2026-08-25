@@ -1733,9 +1733,12 @@ async function transmitPart(page, input, part, index, total) {
 
         if (!(await sendButtonUsable(page))) {
             console.log(" send button not enabled yet, waiting...");
-            // Poll until any in-flight reply finishes instead of guessing with a fixed sleep -
-            // clicking while generating hits the stop button and silently wastes this attempt.
             await waitForGenerationEnd(page);
+            const sendReadyDeadline = Date.now() + 5000;
+            while (!(await sendButtonUsable(page))) {
+                if (Date.now() > sendReadyDeadline) break;
+                await page.waitForTimeout(300);
+            }
         }
 
         await trySend(page, sendButton(page), { requireVisible: true });
@@ -1785,6 +1788,12 @@ async function sendFinaleConfirmed(page, input, text, attempts = 3) {
         console.log(`>> Sending TRANSMISSION COMPLETE (attempt ${attempt}/${attempts})...`);
         await waitForGenerationEnd(page);
         await typePrompt(page, input, text);
+
+        const sendReadyDeadline = Date.now() + 5000;
+        while (!(await sendButtonUsable(page))) {
+            if (Date.now() > sendReadyDeadline) break;
+            await page.waitForTimeout(300);
+        }
 
         const userBefore = await userMessages(page).count();
         await trySend(page, sendButton(page), { requireVisible: true });
