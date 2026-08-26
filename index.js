@@ -30,7 +30,7 @@ const DEFAULT_QUESTION = "What is JavaScript?";
 const DEFAULT_OUTPUT_FILE = "./output.md";
 const PREFS_FILE = path.join(__dirname, ".browser-prefs.json");
 const CONVERSATIONS_FILE = path.join(__dirname, ".chatgpt-conversations.json");
-const MAX_SAVED_CONVERSATIONS = 20;
+const MAX_SAVED_CONVERSATIONS = 50;
 const CONVERSATION_URL_RE = /\/c\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 const PASTE_FILE_EXTENSIONS = new Set([
     ".css",
