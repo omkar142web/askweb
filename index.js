@@ -10,7 +10,7 @@ const crypto = require("crypto");
 const { chromium } = require("playwright-extra");
 const stealth = require("puppeteer-extra-plugin-stealth")();
 
-const URL = "https://chatgpt.com/";
+const URL = "https://chatgpt.com/?temporary-chat=true";
 const LOGIN_URL = "https://chatgpt.com/auth/login";
 const APP_DIR = __dirname;
 const BROWSERS = [
