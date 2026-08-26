@@ -1763,6 +1763,7 @@ async function transmitPart(page, input, part, index, total) {
         const landing = await waitForPartLanding(page, closeTag);
         if (landing.ok) {
             console.log(" landed.");
+            await waitForGenerationEnd(page);
             return true;
         }
 
