@@ -482,7 +482,7 @@ Options:
       --prepend           Prepend the answer before existing content in the output file
       --login             Open ChatGPT to log in and save the session
       --logout            Open ChatGPT to log out (manual, 10 min)
-      --continue          Continue the most recent conversation
+      --continue [id]      Continue the most recent conversation, or a specific one by id prefix
       --new               Start a fresh conversation instead of continuing
       --prompts           Open the Prompt Manager (add/edit/rename/delete/view)
       --prompt-create [name]      Interactively create a new preset
@@ -556,6 +556,7 @@ function parseCliArgs(argv = process.argv.slice(2)) {
         configureBrowserOrder: false,
         resetBrowserPrefs: false,
         continueLast: false,
+        continueConversationId: null,
         newConversation: false,
         showHelp: false,
         showVersion: false,
@@ -612,6 +613,11 @@ function parseCliArgs(argv = process.argv.slice(2)) {
 
         if (arg === "--continue") {
             options.continueLast = true;
+            const next = argv[i + 1];
+            if (next && !next.startsWith("-")) {
+                options.continueConversationId = stripShellQuotes(next);
+                i++;
+            }
             continue;
         }
 
@@ -2303,6 +2309,31 @@ function latestConversation() {
     );
 }
 
+function findConversationById(idPrefix) {
+    const needle = idPrefix.toLowerCase();
+    const conversations = loadConversations().conversations;
+    const matches = conversations.filter(
+        (conversation) =>
+            Array.isArray(conversation.messages) &&
+            conversation.messages.length > 0 &&
+            String(conversation.id || "").toLowerCase().startsWith(needle)
+    );
+
+    if (matches.length === 0) {
+        return null;
+    }
+
+    if (matches.length > 1) {
+        console.log(`>> Multiple conversations match id prefix "${idPrefix}":`);
+        for (const conversation of matches) {
+            console.log(`   ${conversation.id}  "${conversation.title || "(untitled)"}" (${conversation.messages.length} messages)`);
+        }
+        console.log(`>> Using the first match. Use a longer prefix to be specific.`);
+    }
+
+    return matches[0];
+}
+
 function buildContinuationPrompt(history, newQuestion) {
     const transcript = history
         .map((message) => `${message.role === "assistant" ? "[Assistant]" : "[User]"}: ${message.content}`)
@@ -2557,9 +2588,14 @@ async function main() {
     let targetUrl = URL;
     let continuing = null;
     if (!CLI.login && CLI.continueLast) {
-        continuing = latestConversation();
+        continuing = CLI.continueConversationId
+            ? findConversationById(CLI.continueConversationId)
+            : latestConversation();
         if (!continuing) {
-            throw new Error("No saved conversation found. Run a question first, then use --continue.");
+            const hint = CLI.continueConversationId
+                ? ` No saved conversation matches id "${CLI.continueConversationId}".`
+                : "";
+            throw new Error(`No saved conversation found.${hint} Run a question first, then use --continue.`);
         }
         console.log(`>> Resuming conversation: "${continuing.title || continuing.id}" (${continuing.messages?.length || 0} messages).`);
     }
