@@ -1397,7 +1397,7 @@ function buildFullPrompt(question) {
     return question.text ? `${question.text}\n${body}` : body;
 }
 
-const COMPOSER_CHUNK = 6000;
+const COMPOSER_CHUNK = 16000;
 let composerKindLogged = false;
 
 async function prepareComposerProbe(page) {
@@ -1497,7 +1497,7 @@ async function pasteIntoComposer(page, input, text) {
     }
 
     if (!injected && probe.ok) {
-        // Fallback: a single execCommand with tens of KB blocks the page for minutes, so feed it slices.
+        // Fallback: a single execCommand with large text blocks the page, so feed it slices.
         const totalChunks = Math.ceil(text.length / COMPOSER_CHUNK);
         const milestones = new Set([1, Math.ceil(totalChunks / 4), Math.ceil(totalChunks / 2), totalChunks]);
 
@@ -1516,7 +1516,6 @@ async function pasteIntoComposer(page, input, text) {
             if (milestones.has(chunkIndex)) {
                 console.log(`>> Injected ${Math.round((offset / text.length) * 100)}% (${(offset / 1024).toFixed(1)} KB)...`);
             }
-            if (offset < text.length) await page.waitForTimeout(25);
         }
         injected = partialOffset >= text.length;
 
@@ -1843,7 +1842,6 @@ async function sendFinaleConfirmed(page, input, text, attempts = 3) {
 async function sendChunkedPayload(page, input, plan, finalQuestion) {
     console.log(`>> Starting chunked transmission of ${plan.totalParts} part(s)...`);
     for (let i = 0; i < plan.totalParts; i++) {
-        if (i > 0) await page.waitForTimeout(1500);
         await transmitPart(page, input, plan.parts[i], i + 1, plan.totalParts);
     }
 
