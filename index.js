@@ -1322,8 +1322,10 @@ async function attachViaChooser(page, files) {
             .locator(selector("fileMenuButton"))
             .filter({ hasText: /file|upload|computer|photos/i })
             .first();
+
+        const chooserPromise = page.waitForEvent("filechooser", { timeout: 6000 });
         await menuItem.click({ timeout: 4000 });
-        chooser = await page.waitForEvent("filechooser", { timeout: 6000 });
+        chooser = await chooserPromise;
     }
 
     console.log(`>> Setting ${files.length} file(s) via chooser...`);
@@ -1707,6 +1709,21 @@ async function collectFailureDiagnostics(page) {
     }
 }
 
+async function transcriptContainsText(page, needle) {
+    return page
+        .evaluate(
+            ({ selector, needle }) => {
+                const msgs = document.querySelectorAll(selector);
+                for (const msg of msgs) {
+                    if ((msg.innerText || "").includes(needle)) return true;
+                }
+                return false;
+            },
+            { selector: selector("userMessage"), needle }
+        )
+        .catch(() => false);
+}
+
 async function transmitPart(page, input, part, index, total) {
     const openTag = `[PAYLOAD PART ${index}/${total} chars=${part.length}]`;
     const closeTag = `[/PAYLOAD PART ${index}/${total}]`;
@@ -1782,6 +1799,8 @@ async function composerEmpty(page) {
 }
 
 async function sendFinaleConfirmed(page, input, text, attempts = 3) {
+    const marker = `TRANSMISSION COMPLETE - all`;
+
     for (let attempt = 1; attempt <= attempts; attempt++) {
         // Sending while a reply is still generating is a guaranteed no-op (button is a stop button),
         // which used to burn the whole confirmation timeout on attempt 1 every single time.
@@ -1789,21 +1808,28 @@ async function sendFinaleConfirmed(page, input, text, attempts = 3) {
         await waitForGenerationEnd(page);
         await typePrompt(page, input, text);
 
+        if (!(await composerHasContent(page, marker, marker.length))) {
+            console.log(`>> Composer missing TRANSMISSION COMPLETE text, repasting...`);
+            await typePrompt(page, input, text);
+            if (!(await composerHasContent(page, marker, marker.length))) {
+                console.log(`>> Still missing after repaste (attempt ${attempt}/${attempts}).`);
+                if (attempt < attempts) await page.waitForTimeout(3000);
+                continue;
+            }
+        }
+
         const sendReadyDeadline = Date.now() + 5000;
         while (!(await sendButtonUsable(page))) {
             if (Date.now() > sendReadyDeadline) break;
             await page.waitForTimeout(300);
         }
 
-        const userBefore = await userMessages(page).count();
         await trySend(page, sendButton(page), { requireVisible: true });
 
-        const deadline = Date.now() + 20000;
-        let elapsed = 0;
-        while ((elapsed = 20000 - (deadline - Date.now())) < 20000) {
-            const users = await userMessages(page).count();
-            if (users > userBefore) return true;
-            if (elapsed > 1200 && (await composerEmpty(page))) return true;
+        const deadline = Date.now() + 30000;
+        while (Date.now() < deadline) {
+            if (await transcriptContainsText(page, text)) return true;
+            if (await transcriptContainsText(page, marker)) return true;
             await page.waitForTimeout(600);
         }
 
