@@ -1257,21 +1257,42 @@ async function attachmentChipProbe(page, fileName) {
                 const region =
                     (composer && composer.closest("form")) ||
                     (composer && composer.parentElement && composer.parentElement.parentElement) ||
-                    document.body;
+                    null;
                 const stem = name.replace(/\.[^.]+$/, "");
-                let present = false;
-                for (const el of region.querySelectorAll("*")) {
-                    if (el.closest(composerSelector)) continue;
+                const fileNameLower = name.toLowerCase();
+                const stemLower = stem.length > 3 ? stem.toLowerCase() : null;
+                const matches = (el) => {
+                    if (el.closest(composerSelector)) return false;
                     const text = (el.textContent || "").trim();
-                    if (text.length > 300) continue;
+                    if (text.length > 300) return false;
                     const lower = text.toLowerCase();
-                    if (lower.includes(name.toLowerCase()) || (stem.length > 3 && lower.includes(stem.toLowerCase()))) {
-                        present = true;
-                        break;
+                    return lower.includes(fileNameLower) || (stemLower && lower.includes(stemLower));
+                };
+                let present = false;
+                if (region) {
+                    // Faster path: check the composer's attachment/preview strip first (a small
+                    // high-signal subtree). Only fall back to the full form walk if no chip classes
+                    // are present, so a successful upload is confirmed without walking every
+                    // descendant of the whole form on each 700ms poll.
+                    const scopes = [];
+                    let cur = composer;
+                    while (cur && scopes.length < 4) {
+                        for (const node of cur.querySelectorAll("[class*='attach'], [class*='chip']")) {
+                            scopes.push(node);
+                        }
+                        cur = cur.parentElement;
+                    }
+                    for (const scope of scopes.length ? scopes : [region]) {
+                        for (const el of scope.querySelectorAll("*")) {
+                            if (matches(el)) {
+                                present = true;
+                                break;
+                            }
+                        }
+                        if (present) break;
                     }
                 }
-                const uploading = !!region.querySelector(progressSelector);
-                return { present, uploading };
+                return { present, uploading: !!region && !!region.querySelector(progressSelector) };
             },
             {
                 composerSelector: selector("promptInput"),
