@@ -614,7 +614,7 @@ function parseCliArgs(argv = process.argv.slice(2)) {
         if (arg === "--continue") {
             options.continueLast = true;
             const next = argv[i + 1];
-            if (next && !next.startsWith("-")) {
+            if (next && looksLikeConversationId(stripShellQuotes(next))) {
                 options.continueConversationId = stripShellQuotes(next);
                 i++;
             }
@@ -2306,6 +2306,16 @@ function latestConversation() {
         loadConversations().conversations.find(
             (conversation) => Array.isArray(conversation.messages) && conversation.messages.length > 0
         ) || null
+    );
+}
+
+function looksLikeConversationId(token) {
+    const trimmed = String(token || "").trim();
+    if (!trimmed) return false;
+    const fullUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (fullUuid.test(trimmed)) return true;
+    return loadConversations().conversations.some((conversation) =>
+        String(conversation.id || "").toLowerCase().startsWith(trimmed.toLowerCase())
     );
 }
 
