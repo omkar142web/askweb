@@ -438,6 +438,25 @@ const isOnAuthPage = (page) => {
     return url.includes("/auth/login") || url.includes("/auth/signin");
 };
 
+const AUTH_COOKIE_NAMES = [
+    "__Secure-next-auth.session-token",
+    "next-auth.session-token",
+    "authjs.session-token",
+];
+
+async function readChatGptCookies(context) {
+    const cookies = await context.cookies("https://chatgpt.com").catch(() => []);
+    const names = new Set(cookies.map((cookie) => cookie.name));
+    const hasSession = (name) => names.has(name);
+    const present = AUTH_COOKIE_NAMES.filter(hasSession);
+    return { cookies, present, authed: present.length > 0 };
+}
+
+async function isLoggedInViaCookies(context) {
+    const { authed } = await readChatGptCookies(context).catch(() => ({ authed: false }));
+    return authed;
+}
+
 const POPUP_DISMISS_PATTERNS = [
     { text: /stay\s*logged\s*out/i, label: "Stay logged out" },
     { text: /continue\s+logged\s*out/i, label: "Continue logged out" },
@@ -1081,14 +1100,14 @@ async function pressSendAndConfirm(page, timeoutMs = 8000) {
     return sentDetected;
 }
 
-async function resetComposer(page, targetUrl = URL) {
+async function resetComposer(page, targetUrl = URL, context = null) {
     await dismissBlockingUI(page);
     if (!(await uploadOverlayVisible(page))) return;
 
     console.log(">> Upload overlay still visible, reloading ChatGPT...");
     await gotoChatGPT(page, targetUrl);
     await page.waitForTimeout(2000);
-    await waitForChatGPTReady(page, targetUrl);
+    await waitForChatGPTReady(page, targetUrl, context);
 }
 
 async function gotoChatGPT(page, targetUrl = URL) {
@@ -1125,14 +1144,20 @@ async function isPromptReady(page) {
     return !(await modalVisible(page));
 }
 
-async function waitForChatGPTReady(page, targetUrl = URL) {
+async function waitForChatGPTReady(page, targetUrl = URL, context = null) {
     console.log(">> Opening ChatGPT...");
+    let loggedIn = context ? await isLoggedInViaCookies(context) : null;
+    if (loggedIn) console.log(">> Login detected via session cookie.");
+    else if (loggedIn === false) console.log(">> Not logged in (no ChatGPT session cookie). Use --login to sign in for uploads.");
     await gotoChatGPT(page, targetUrl);
     await page.waitForTimeout(2000);
 
     const deadline = Date.now() + 5 * 60 * 1000;
     let lastNotice = 0;
     while (Date.now() < deadline) {
+        if (context) {
+            loggedIn = await isLoggedInViaCookies(context);
+        }
         if (await isPromptReady(page)) break;
         await dismissBlockingUI(page);
         if (await isPromptReady(page)) break;
@@ -1140,12 +1165,14 @@ async function waitForChatGPTReady(page, targetUrl = URL) {
         if (Date.now() - lastNotice > 15000) {
             lastNotice = Date.now();
             const elapsed = Math.round((Date.now() - (deadline - 5 * 60 * 1000)) / 1000);
-            if (isOnAuthPage(page)) {
+            if (loggedIn) {
+                console.log(`>> Logged in (session cookie present), waiting for the prompt to become ready... (${elapsed}s) url=${page.url()}`);
+            } else if (isOnAuthPage(page)) {
                 console.log(`>> Waiting for login... (${elapsed}s) Not logged in in this browser profile. Log in inside the window, or run \`askweb --login\`.`);
             } else {
                 const pageText = await page.evaluate(() => document.body.innerText.slice(0, 120)).catch(() => "");
                 const summary = pageText.replace(/\s+/g, " ").trim() || "(empty page)";
-                console.log(`>> Waiting for ChatGPT prompt... (${elapsed}s) url=${page.url()} text="${summary}"`);
+                console.log(`>> Not logged in, running anonymously; waiting for ChatGPT prompt... (${elapsed}s) url=${page.url()} text="${summary}"`);
             }
         }
         await page.waitForTimeout(1000);
@@ -1882,21 +1909,23 @@ async function looksLoggedOut(page) {
         .catch(() => false);
 }
 
-async function sendQuestion(page, question, targetUrl = URL) {
-    const input = await waitForChatGPTReady(page, targetUrl);
+async function sendQuestion(page, question, targetUrl = URL, context = null) {
+    const input = await waitForChatGPTReady(page, targetUrl, context);
     markPhase("ready");
     const assistantCountBefore = await assistantMessages(page).count();
 
     let attached = false;
-    const loggedOut = await looksLoggedOut(page);
-    if (loggedOut) {
-        console.log(">> Detected: not logged in. Upload features will be limited.");
+    const loggedIn = context ? await isLoggedInViaCookies(context) : !(await looksLoggedOut(page));
+    if (!loggedIn) {
+        console.log(">> Detected: not logged in (no session cookie). Upload features will be limited.");
+    } else {
+        console.log(">> Logged in (session cookie present).");
     }
     if (question.files.length > 0) {
         console.log(`>> Loaded ${question.files.length} file(s): ${question.files.map((file) => file.name).join(", ")}`);
         if (shouldPasteFiles(question.files)) {
             console.log(">> Text/code file detected, using paste mode.");
-        } else if (loggedOut) {
+        } else if (!loggedIn) {
             console.log(">> Not logged in - file upload is unavailable, falling back to paste mode.");
         } else {
             try {
@@ -1906,7 +1935,7 @@ async function sendQuestion(page, question, targetUrl = URL) {
                 await page.waitForTimeout(3000);
             } catch (error) {
                 console.log(`>> Upload failed (${firstLine(error)}), falling back to paste.`);
-                await resetComposer(page, targetUrl);
+                await resetComposer(page, targetUrl, context);
             }
         }
     }
@@ -1924,7 +1953,7 @@ async function sendQuestion(page, question, targetUrl = URL) {
             `>> Payload is ${(payload.length / 1024).toFixed(1)} KB, above the ${Math.round(SINGLE_PASTE_MAX / 1024)} KB single-message budget.`
         );
         let staged = null;
-        if (loggedOut) {
+        if (!loggedIn) {
             console.log(">> Not logged in - skipping upload attempts, going straight to chunked transmission.");
         } else {
             staged = stageTempPayload(payload);
@@ -1939,13 +1968,13 @@ async function sendQuestion(page, question, targetUrl = URL) {
                 await page.waitForTimeout(3000);
             } catch (error) {
                 console.log(`>> Single-file attachment failed (${firstLine(error)}), switching to chunked transmission.`);
-                await resetComposer(page, targetUrl);
+                await resetComposer(page, targetUrl, context);
             }
         }
         if (!attached) {
             const { plan, manualChunkSize } = buildDeliveryPlan(payload);
             deliveryPlan = plan;
-            if (loggedOut && deliveryPlan.totalParts > ANON_MAX_PARTS) {
+            if (!loggedIn && deliveryPlan.totalParts > ANON_MAX_PARTS) {
                 throw new Error(
                     `Payload is ${(payload.length / 1024).toFixed(1)} KB - an anonymous chat can only receive about ${Math.round(
                         (ANON_MAX_PARTS * ANON_PART_SIZE_CEILING) / 1024
@@ -2172,7 +2201,7 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
     return markdown;
 }
 
-async function runLoginFlow(page) {
+async function runLoginFlow(page, context = null) {
     console.log(">> Starting login flow. Please log in with your account (up to 10 min)...");
     await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
     await page.waitForTimeout(2000);
@@ -2183,6 +2212,12 @@ async function runLoginFlow(page) {
     while (Date.now() - startTime < maxWait) {
         await page.waitForTimeout(2000);
 
+        const loggedInByCookie = context ? await isLoggedInViaCookies(context) : false;
+        if (loggedInByCookie) {
+            console.log(">> Login detected via session cookie. Session saved in the browser profile for future runs.");
+            return;
+        }
+
         if (!isOnAuthPage(page)) {
             await dismissBlockingUI(page);
 
@@ -2192,8 +2227,20 @@ async function runLoginFlow(page) {
                     await input.waitFor({ state: "visible", timeout: 5000 });
                     await waitForEnabled(page, input);
                     await input.click({ timeout: 5000 });
-                    console.log(">> Login detected. Session saved in the browser profile for future runs.");
-                    return;
+                    if (context) {
+                        console.log(">> Login prompt ready. Confirming authentication...");
+                        const confirmDeadline = Date.now() + 15000;
+                        while (Date.now() < confirmDeadline) {
+                            if (await isLoggedInViaCookies(context)) {
+                                console.log(">> Login detected via session cookie. Session saved in the browser profile for future runs.");
+                                return;
+                            }
+                            await page.waitForTimeout(1000);
+                        }
+                    } else {
+                        console.log(">> Login detected. Session saved in the browser profile for future runs.");
+                        return;
+                    }
                 } catch {}
             }
         }
@@ -2648,7 +2695,7 @@ async function main() {
 
     try {
         if (loginOnly) {
-            await runLoginFlow(page);
+            await runLoginFlow(page, context);
             return;
         }
         if (continuing) {
@@ -2656,7 +2703,7 @@ async function main() {
                 `>> Replaying ${continuing.messages.length} saved message(s) into a fresh chat${continuing.title ? ` ("${continuing.title}")` : ""}`
             );
         }
-        const assistantCountBefore = await sendQuestion(page, question, targetUrl);
+        const assistantCountBefore = await sendQuestion(page, question, targetUrl, context);
         const answer = await waitForAnswer(page, assistantCountBefore);
         console.log("\n--- ANSWER ---\n");
         console.log(answer.trim());
