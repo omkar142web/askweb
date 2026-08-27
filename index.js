@@ -988,6 +988,22 @@ async function dismissBlockingUI(page) {
     if (sawNoAuthModal) console.log(">> No-auth popup detected.");
     if (sawUploadOverlay) console.log(">> Upload overlay detected.");
     let dismissed = false;
+    let escapedOnce = false;
+
+    async function pressEscape() {
+        console.log(">> Pressing Escape to dismiss blocking UI...");
+        await page.keyboard.press("Escape");
+        await page.waitForTimeout(1000);
+        dismissed = true;
+    }
+
+    if (await blockingDialogVisible(page)) {
+        await pressEscape();
+        escapedOnce = true;
+        if (!(await blockingDialogVisible(page))) {
+            console.log(">> Blocking UI cleared after Escape.");
+        }
+    }
 
     for (let attempt = 0; attempt < 5; attempt++) {
         if (!(await blockingDialogVisible(page))) {
@@ -1010,11 +1026,9 @@ async function dismissBlockingUI(page) {
         await page.waitForTimeout(500);
     }
 
-    if (await blockingDialogVisible(page)) {
+    if (await blockingDialogVisible(page) && !escapedOnce) {
         console.log(">> Blocking UI still present, pressing Escape as fallback...");
-        await page.keyboard.press("Escape");
-        await page.waitForTimeout(1000);
-        dismissed = true;
+        await pressEscape();
     }
 
     if (sawNoAuthModal && !(await modalVisible(page))) {
