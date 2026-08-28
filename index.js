@@ -391,90 +391,387 @@ chromium.use(stealth);
 
 const VERSION = require("./package.json").version;
 
-function showHelp() {
-    console.log(`ChatGPT CLI
+const OPTION_DEFINITIONS = [
+    {
+        flags: ["-o", "--output"],
+        arg: "<file>",
+        argRequired: true,
+        desc: "Write the answer to <file> instead of printing it. The path is resolved relative to your current directory.",
+        note: `Default: ${DEFAULT_OUTPUT_FILE}; also accepts --output=<file>.`,
+        example: 'askweb -o answer.md "Explain closures"',
+    },
+    {
+        flags: ["--append"],
+        desc: "Append the answer to the end of an existing output file.",
+        note: "Requires --output. Mutually exclusive with --prepend.",
+        example: 'askweb --append --output notes.md "Add a section"',
+    },
+    {
+        flags: ["--prepend"],
+        desc: "Prepend the answer to the beginning of an existing output file.",
+        note: "Requires --output. Mutually exclusive with --append.",
+        example: 'askweb --prepend --output notes.md "New intro at top"',
+    },
+    {
+        flags: ["--login"],
+        desc: "Open the ChatGPT login page and wait for you to sign in so the session cookie is saved.",
+        note: "Standalone action: ignores the question, files, --continue, and --new.",
+        example: "askweb --login",
+    },
+    {
+        flags: ["--logout"],
+        desc: "Open ChatGPT and wait for you to log out manually; the session cookie is then cleared.",
+        note: "Standalone action (manual, up to 10 minutes).",
+        example: "askweb --logout",
+    },
+    {
+        flags: ["--continue"],
+        arg: "[id]",
+        argOptional: true,
+        desc: "Resume a saved conversation. With no id, resumes the most recent one; with a full or prefix id, resumes that one. The saved transcript is replayed into a fresh chat and your new text is appended.",
+        note: "Mutually exclusive with --new. The id takes a separate token, not --continue=<id>.",
+        example: 'askweb --continue "Give me one more example"',
+    },
+    {
+        flags: ["--new"],
+        desc: "Start a fresh conversation. A fresh chat is also the default for every run.",
+        note: "Mutually exclusive with --continue.",
+        example: "askweb --new \"Let's discuss React\"",
+    },
+    {
+        flags: ["--prompts"],
+        desc: "Open the Prompt Manager to add, edit, rename, delete, or view presets.",
+        note: "Standalone action (interactive).",
+        example: "askweb --prompts",
+    },
+    {
+        flags: ["--prompt-create"],
+        arg: "[name]",
+        argOptional: true,
+        desc: "Interactively create a new prompt preset. If <name> is omitted you are prompted for one.",
+        note: "Standalone action (interactive). <name> must match [-a-z0-9_]+ and must not start with '-'.",
+        example: "askweb --prompt-create fix",
+    },
+    {
+        flags: ["--<preset>"],
+        arg: "[text]",
+        argOptional: true,
+        desc: "Run a prompt preset like a native command (e.g. --explain, --find-error). Presets accept files and a question.",
+        note: `Only one preset per run. Built-ins: ${Object.keys(BUILTIN_PROMPTS).join(", ")}. Custom presets are listed in PROMPT PRESETS below.`,
+        example: 'askweb --explain "JavaScript closures"',
+    },
+    {
+        flags: ["--browser"],
+        desc: "Open a menu to choose the default browser (Chrome, Brave, Edge).",
+        note: "Standalone action (interactive).",
+        example: "askweb --browser",
+    },
+    {
+        flags: ["--browser-order"],
+        desc: "Open a menu to reorder the browser fallback list used when the default is missing.",
+        note: "Standalone action (interactive).",
+        example: "askweb --browser-order",
+    },
+    {
+        flags: ["--browser-reset"],
+        desc: "Delete saved browser preferences and return to automatic selection (Chrome first).",
+        note: "Standalone action.",
+        example: "askweb --browser-reset",
+    },
+    {
+        flags: ["--clear-session"],
+        desc: "Wipe the browser profile's local/session storage before launching, so ChatGPT starts fresh (logged out) for this run.",
+        note: "Modifier: combine with a question or with --login.",
+        example: 'askweb --clear-session "What is today\'s date?"',
+    },
+    {
+        flags: ["--clear-conversations"],
+        desc: "Delete the local conversation history file (.chatgpt-conversations.json).",
+        note: "Standalone action. To remove one conversation, use --clear-conversation <id>.",
+        example: "askweb --clear-conversations",
+    },
+    {
+        flags: ["--clear-conversation"],
+        arg: "<id>",
+        argRequired: true,
+        desc: "Delete a single saved conversation whose id starts with <id> (full id or a unique prefix).",
+        note: "Standalone action. Also accepts --clear-conversation=<id>.",
+        example: "askweb --clear-conversation <id>",
+    },
+    {
+        flags: ["-h", "--help"],
+        desc: "Show this help.",
+        example: "askweb --help",
+    },
+    {
+        flags: ["-v", "--version"],
+        desc: "Show the version and exit.",
+        example: "askweb --version",
+    },
+];
 
-Usage:
+function renderOption(def) {
+    const head = def.arg ? def.flags.join(", ") + " " + def.arg : def.flags.join(", ");
+    const notes = [];
+    if (def.argRequired) notes.push("Requires an argument.");
+    if (def.argOptional) notes.push("Argument is optional.");
+    notes.push(def.desc);
+    if (def.note) notes.push(def.note);
+    return "  " + head + "\n" + notes.map((n) => "      " + n).join("\n") + "\n      Example: " + def.example;
+}
+
+function buildHelpText() {
+    const registry = loadPromptRegistry();
+    const builtins = Object.entries(BUILTIN_PROMPTS);
+    const noInput = builtins.filter(([, e]) => !normalizePromptEntry(e).arguments).map(([n]) => `--${n}`);
+    const withInput = builtins.filter(([, e]) => normalizePromptEntry(e).arguments).map(([n]) => `--${n}`);
+    const custom = [...registry.entries()].filter(([, e]) => !e.builtin);
+    const customNote = custom.length
+        ? "Custom presets: " +
+          custom.map(([n, e]) => `--${n}` + (e.arguments ? " (takes {{input}})" : "")).join(", ") +
+          "."
+        : "No custom presets yet (create one with --prompt-create <name>).";
+
+    return `ChatGPT CLI
+
+DESCRIPTION
+  askweb sends a question to ChatGPT from your terminal and prints the reply.
+  It drives a real, persistent browser session (Playwright), so the browser
+  profile and any login are reused across runs.
+
+  Provide a question as text and/or attach files. Text and code files are
+  pasted inline; binary files are uploaded when you are logged in. Logging
+  in is optional: askweb runs anonymously by default.
+
+USAGE
   askweb [options] [question] [files...]
   node index.js [options] [question] [files...]
 
-Ask ChatGPT a question directly from your terminal. Files passed as arguments
-(or referenced with @path) are attached to the prompt; text/code files are
-pasted inline, other files are uploaded.
+  question     Optional text to send. Default: "${DEFAULT_QUESTION}".
+  files...     Optional; zero or more files (see FILES).
+  options      May appear before, between, or after the question and files.
 
-Arguments:
-  question                Question text (default: "${DEFAULT_QUESTION}")
-  files...                Files to attach; "@path" also references a file
-  Use "--" before the question to treat leading dashes as literal text.
-  Options can appear anywhere before "--".
+  Parsing rules:
+    - A bare token is attached as a file only if it exists on disk.
+    - "@path" always forces a file reference.
+    - "--" stops option parsing; tokens after it are treated as literal
+      question text / files.
 
-Options:
-  -o, --output <file>     Save the answer to a file (default: ${DEFAULT_OUTPUT_FILE})
-      --append            Append the answer after existing content in the output file
-      --prepend           Prepend the answer before existing content in the output file
-      --login             Open ChatGPT to log in and save the session
-      --logout            Open ChatGPT to log out (manual, up to 10 min)
-      --continue [id]      Continue the most recent conversation, or a specific one by id prefix
-      --new               Start a fresh conversation instead of continuing
-      --prompts           Open the Prompt Manager (add/edit/rename/delete/view)
-      --prompt-create [name]      Interactively create a new preset
-      --<preset>          Run a prompt preset, e.g. --explain "closures"
-      --browser           Configure default browser interactively
-      --browser-order     Configure browser fallback order
-      --browser-reset     Reset browser preferences to automatic
-      --clear-session     Clear saved local storage on launch
-      --clear-conversations Delete all saved conversation history
-      --clear-conversation <id> Delete one saved conversation by id (prefix ok)
-  -h, --help              Show this help
-  -v, --version           Show version
-
-Prompt presets:
-  Named, reusable prompts that work like native commands:
-    node index.js --astronaut
-    node index.js --explain "JavaScript closures"
-    node index.js --fix test.py
-  Words after the flag fill the template's {{input}} slot; presets without
-  one get the words appended as "Extra focus".
-  Built-ins: ${Object.keys(BUILTIN_PROMPTS).map((name) => `--${name}`).join(", ")}
-  Custom presets live in .askweb-prompts.json next to index.js - manage
-  them with --prompts.
-
-Conversations:
-  Every run saves its Q&A history locally to .chatgpt-conversations.json.
-  By default each run starts a fresh chat; pass --continue to replay the
-  saved transcript into a new chat so full context carries over (works
-  even when logged out).
-
-Notes:
-  Browser profiles and history live in the install directory, so you can
-  run askweb from any working directory; only -o resolves relative to
-  your current directory.
-  Large contexts: payloads over ~25 KB are delivered automatically - as a
-  single file attachment when logged in, otherwise as a numbered multipart
-  transmission packed into the fewest, largest messages ChatGPT reliably
-  accepts; it answers only after the final part arrives.
-  Logged-out chats accept up to ~293 KB this way; beyond that, log in and
-  payloads upload as one attachment instead. Upload attempts are skipped
-  entirely while logged out to save time.
-  Set ASKWEB_CHUNK_SIZE=<chars> to force a specific part size instead of
-  automatic packing.
-  Quoted "@paths with spaces" work: askweb "summarize" "@C:\\my notes\\doc.md"
-  If the browser opens but you are not logged in, log in inside the window
-  or run once with --login; the session persists for future runs.
-
-Examples:
-  askweb "Explain event loops"
-  askweb -o result.md "Explain quantum computing"
-  askweb --continue "Give me 3 examples"
-  askweb --new "Start a fresh discussion about React"
-  askweb "Review this code" src/index.js utils.js
-  askweb -o summary.md "Summarize" @notes.md
-  askweb --prompts
-  askweb --prompt-create astronaut
-  askweb --astronaut
+BASIC COMMANDS
+  askweb "Explain JavaScript closures"
+    Ask a simple question (the reply is printed).
+  askweb "Review this code" src/index.js
+    Ask about one file (the file is attached).
   askweb --explain "JavaScript closures"
-  askweb --find-error src/index.js utils.js
-  askweb -o out.md -- "-explain this flag"`);
+    Run a preset; the words fill the template's {{input}} slot.
+  askweb --find-error src/index.js a.js b.js
+    Run a preset over multiple files.
+
+OPTIONS
+${OPTION_DEFINITIONS.map(renderOption).join("\n\n")}
+
+SPECIAL SYNTAX
+  --  Treat the next token as literal question text instead of an option.
+    Needed when a question begins with a dash.
+      askweb -- "-explain this"
+      askweb -o out.md -- "review -x flag"
+  @path  Force a file reference even when the token would otherwise look like
+    question text. Quote it if the path contains spaces.
+      askweb "summarize" "@C:\\my notes\\doc.md"
+  Options may appear before, between, or after the question and files. Only
+  tokens after "--" are guaranteed to be treated literally.
+
+FILES
+  Attach files by listing their paths; each shell argument is one file, so
+  whitespace never splits an argument and quoted paths with spaces are safe:
+    askweb "Review this" src/index.js
+    askweb "Summarize these" a.md b.md c.txt
+    askweb "Review" "@C:\\my notes\\document.md"
+
+  Behavior by file type:
+    - Text/code files (.js .ts .py .md .json .css .html .csv .xml .yaml .yml
+      .txt .jsx .tsx) are pasted inline as fenced code blocks.
+    - Other (binary) files are uploaded as attachments when logged in, and
+      inlined as base64 <file> blocks when logged out.
+
+  Detection rules:
+    - A bare token is attached as a file only if it exists on disk.
+    - "@path" always forces a file reference (use this for files that may be
+      missing or whose path could be mistaken for question text).
+    - A missing @path is an error ("File not found"). A missing bare token is
+      treated as part of the question text.
+
+  Large payloads:
+    - A single paste is capped at about 25 KB (25000 chars). Anything larger
+      is delivered as a numbered, multi-part transmission that ChatGPT
+      acknowledges part-by-part before answering.
+    - Logged-in users can also upload larger payloads as a single attachment.
+    - Anonymous (logged-out) transmission is capped at about 293 KB (~6 parts).
+      Beyond that, log in (askweb --login) or trim the input.
+    - Set ASKWEB_CHUNK_SIZE=<chars> to override the automatic part size.
+
+LOGIN & BROWSER
+  askweb needs no account. It runs anonymously by default; the browser opens
+  and you can start asking right away. Logging in is only required for file
+  uploads and large payloads.
+
+  askweb --login
+      Opens the ChatGPT login page and waits (up to 10 min) for you to sign
+      in. The session cookie is saved in the browser profile and reused by
+      later runs, so you only do this once.
+
+  askweb --logout
+      Opens ChatGPT and waits for you to log out manually; the session
+      cookie is then cleared from the profile.
+
+  Browser selection (Chrome, Brave, Edge):
+    askweb tries browsers in a saved order (Chrome first by default) and uses
+    the first one installed on this machine. Preferences live in
+    .browser-prefs.json (in the install directory).
+      --browser           Choose the default browser interactively.
+      --browser-order     Reorder the fallback list interactively.
+      --browser-reset     Reset to automatic selection (Chrome first).
+    --clear-session wipes local/session storage for the next launch, so the
+    browser starts logged out/anonymous:
+      askweb --clear-session "Who won the 2024 election?"
+
+PROMPT PRESETS
+  Presets are reusable prompts invoked like native flags (--explain, ...).
+  They accept files and a question just like a normal ask:
+    askweb --find-error src/index.js a.js b.js
+    askweb --explain "JavaScript closures"
+    askweb --review src/index.js -o review.md
+
+  Words after the flag fill the template's {{input}} slot. A preset with
+  {{input}} requires at least one word and substitutes it; a preset without
+  {{input}} appends the words as "Extra focus".
+    Built-in presets (no {{input}}): ${noInput.join(", ")}
+    Built-in presets (use {{input}}): ${withInput.join(", ")}
+    ${customNote}
+  Manage presets with --prompts (interactive) or --prompt-create <name>.
+  Preset names may not collide with CLI flags (--continue, --login, ...).
+
+CONVERSATIONS
+  Each run that returns an answer is saved locally to
+  .chatgpt-conversations.json (in the install directory; up to 50 recent
+  conversations are kept). Every chat starts fresh by default.
+    --continue          Resume the most recent saved conversation.
+    --continue <id>     Resume a specific one (full id or unique prefix).
+    --new               Start fresh (the default).
+  --continue replays the saved transcript into a NEW ChatGPT chat, so full
+  context carries over. It works even when logged out. After each answer the
+  updated conversation is saved; the id is printed so you can pass it to
+  --continue <id> later.
+
+OUTPUT
+  -o, --output <file>   Write the answer to <file> (default: ${DEFAULT_OUTPUT_FILE}).
+  --append              Append the answer to an existing output file.
+  --prepend             Prepend the answer to an existing output file.
+  The output path is resolved relative to your current directory. --append
+  and --prepend both require --output and cannot be used together; without
+  either, the file is overwritten.
+  Example:
+    askweb -o answer.md "Explain closures"
+    askweb --append --output notes.md "Add a section"
+    askweb --prepend --output notes.md "New intro at top"
+
+VALID COMBINATIONS
+  askweb --continue "Give me another example"
+    Resume the most recent conversation with a new question.
+  askweb --continue <id> "Continue from here"
+    Resume a specific conversation with a new question.
+  askweb --continue <id>
+    Resume a specific conversation using the default question.
+  askweb --new "Start a fresh discussion"
+    Start a fresh chat with a question.
+  askweb -o answer.md "Explain this"
+    Save the answer to a file.
+  askweb --append --output notes.md "Add another explanation"
+    Append to an existing notes file.
+  askweb --prepend --output notes.md "Put this at the top"
+    Prepend to an existing notes file.
+  askweb --find-error src/index.js -o bugs.md
+    Run a preset, attach a file, and save the result.
+  askweb --explain "JavaScript closures" -o out.md
+    Run a preset that takes {{input}} and save the result.
+  askweb --clear-session "Who won the 2024 election?"
+    Start a clean (anonymous) chat with a question.
+  askweb -- "-dash question"
+    Send a question that begins with a dash.
+
+INVALID USAGE
+  askweb --continue --new "hello"
+    -> Use either --continue or --new, not both.
+  askweb --append --prepend "hello"
+    -> Use either --append or --prepend, not both.
+  askweb --append --append
+    -> Use either --append or --prepend, not both.
+  askweb --output
+    -> --output requires a file path.
+  askweb --clear-conversation
+    -> --clear-conversation requires a conversation id.
+  askweb --explain --review "x"
+    -> Multiple prompt presets cannot be combined: --explain and --review.
+  askweb --explain
+    -> Preset --explain takes an argument, e.g.: node index.js --explain "your input".
+  askweb --continue=<id> "x"
+    -> Unknown option: --continue=<id> (use a space: --continue <id> "x").
+  askweb --does-not-exist "hello"
+    -> Unknown option: --does-not-exist.
+
+EXAMPLES
+  Simple question
+    askweb "What is a closure in JavaScript?"
+  Ask about one file
+    askweb "Review this code" src/index.js
+  Multiple files
+    askweb "Find bugs across these files" src/a.js src/b.js
+  Save the answer
+    askweb -o answer.md "Explain promises"
+  Append to a notes file
+    askweb --append --output notes.md "Another explanation"
+  Continue the last conversation
+    askweb --continue "Now explain it with an example"
+  Continue a specific conversation
+    askweb --continue <id> "More on this topic"
+  Start fresh
+    askweb --new "Let's discuss React"
+  Login (once, per user)
+    askweb --login
+  Browser configuration
+    askweb --browser
+  Prompt manager
+    askweb --prompts
+  Create a preset
+    askweb --prompt-create fix
+  Run a built-in preset
+    askweb --explain "JavaScript closures"
+  Run a built-in preset with files
+    askweb --find-error src/index.js src/utils.js
+  Force a literal question after --
+    askweb -o out.md -- "-explain this"
+
+ENVIRONMENT
+  ASKWEB_CHUNK_SIZE=<characters>
+      Force the part size (in characters) used by the anonymous multi-part
+      transmission path. Overrides the automatic packing. Only used when a
+      payload exceeds the single-message budget.
+      Example (Windows): $env:ASKWEB_CHUNK_SIZE=40000; node index.js "long q"
+      Example (Unix):    ASKWEB_CHUNK_SIZE=40000 node index.js "long q"
+
+NOTES
+  - Browser profiles and conversation history live in the install directory,
+    so you can run askweb from any folder. Only --output and file arguments
+    resolve relative to your current directory.
+  - Quoted paths with spaces work everywhere, including @paths.
+  - Only one prompt preset may be used per run.
+  - --append and --prepend are mutually exclusive.
+  - --continue and --new are mutually exclusive.
+  - askweb --help (-h) shows this help; askweb --version (-v) shows the version.`;
+}
+
+function showHelp() {
+    console.log(buildHelpText());
 }
 
 function parseCliArgs(argv = process.argv.slice(2)) {
