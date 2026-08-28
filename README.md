@@ -30,20 +30,40 @@ askweb controls a persistent browser session, so the same browser profile and (o
 
 ## Installation
 
+The easiest way to install askweb is from npm as a global CLI:
+
 ```bash
-git clone <your-repo-url>
+npm install -g rutkar
+npx playwright install chromium   # one-time: install browser binaries
+```
+
+After installation, `askweb` is available from any directory:
+
+```bash
+askweb "What is JavaScript?"
+```
+
+### Update
+
+```bash
+npm update -g rutkar
+```
+
+### Uninstall
+
+```bash
+npm uninstall -g rutkar
+```
+
+### Development / Source Install
+
+For development or local builds from source:
+
+```bash
+git clone https://github.com/omkar142web/askweb.git
 cd askweb
 npm install
 npx playwright install chromium
-```
-
-### Global CLI
-
-`package.json` exposes a `bin` entry, so after installing you can also use:
-
-```bash
-npm install -g .
-askweb "What is JavaScript?"
 ```
 
 ### npm Script Shortcuts
