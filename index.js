@@ -314,101 +314,31 @@ async function runPromptManager() {
     console.log(">> Prompt Manager closed.");
 }
 
-const SELECTORS = {
-    promptInput: [
-        "#mobile-composer-prompt",
-        "#prompt-textarea",
-        'textarea[aria-label="Chat with ChatGPT"]',
-        'textarea[placeholder="Ask ChatGPT"]',
-        '[contenteditable="true"][role="textbox"]',
-    ],
-    sendButton: [
-        '[data-testid="send-button"]',
-        'button[aria-label="Send message"]',
-    ],
-    stopButton: [
-        '[data-testid="stop-button"]',
-        'button[aria-label="Stop streaming"]',
-    ],
-    assistantMessage: [
-        '[data-message-author-role="assistant"]',
-        '[class*="_assistantMessage"]:not([class*="Actions"])',
-    ],
-    userMessage: [
-        '[data-message-author-role="user"]',
-        '[class*="_userMessageGroup"]',
-        '[class*="_userMessage"]:not([class*="Actions"])',
-    ],
-    attachButton: [
-        '[data-testid="composer-plus-btn"]',
-        'button[aria-label="Add files and more"]',
-    ],
-    copyButton: [
-        '[data-testid="copy-turn-action-button"]',
-        'button[aria-label="Copy response"]',
-    ],
-    fileInput: ['input[type="file"]'],
-    blockingDialog: [
-        '[role="dialog"]',
-        '[aria-modal="true"]',
-        '[data-testid*="modal"]',
-        '[class*="modal"]',
-        '[class*="popover"]',
-    ],
-    noAuthModal: ['[data-testid="modal-no-auth-login"]'],
-    dismissButton: ['button', '[role="button"]', 'a'],
-    fileMenuButton: ['[role="menuitem"]', '[role="menu"] button', '[role="dialog"] button'],
-    uploadProgress: [
-        '[role="progressbar"]',
-        '.animate-spin',
-    ],
-    messageBoundary: ['[data-message-author-role]'],
-};
-
-const selector = (name) => SELECTORS[name].join(", ");
-const promptInput = (page) => CHATGPT_DOM.visible(page, "promptInput");
-const sendButton = (page) => CHATGPT_DOM.locator(page, "sendButton").first();
-const assistantMessages = (page) => CHATGPT_DOM.visibleAll(page, "assistantMessage");
-const userMessages = (page) => CHATGPT_DOM.locator(page, "userMessage");
-
-function firstVisibleElement(selector) {
-    const visible = (el) =>
-        !!el &&
-        (typeof el.checkVisibility === "function"
-            ? el.checkVisibility()
-            : !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length));
-    return [...document.querySelectorAll(selector)].find((el) => visible(el)) || null;
-}
-
-function elementText(el) {
-    if (!el) return "";
-    return "value" in el ? el.value || "" : el.innerText || el.textContent || "";
-}
-
-function isUsableControl(el) {
-    return !!el && !el.disabled && !el.readOnly && el.getAttribute("aria-disabled") !== "true";
-}
-
-const PAGE_DOM_SOURCE = {
-    firstVisibleElement: `(${firstVisibleElement.toString()})`,
-    elementText: `(${elementText.toString()})`,
-    isUsableControl: `(${isUsableControl.toString()})`,
-};
-
-const CHATGPT_DOM = {
+// All ChatGPT DOM knowledge (selectors, browser helpers, and the semantic
+// popup/composer-detection layer) lives in ./chatgpt-ui so that DOM changes
+// only need to be updated in one place. Higher-level code here depends on the
+// resilient semantic API (e.g. dismissBlockingUI, isPromptReady), never on raw
+// ChatGPT CSS classes.
+const {
     selector,
-    locator: (page, name) => page.locator(selector(name)),
-    visible: (page, name) => page.locator(selector(name)).filter({ visible: true }).first(),
-    visibleAll: (page, name) => page.locator(selector(name)).filter({ visible: true }),
-    textLocator: (page, pattern) => page.getByText(pattern).first(),
-    pageHelpers: () => PAGE_DOM_SOURCE,
-    promptPayload: () => ({
-        selector: selector("promptInput"),
-        finderSource: PAGE_DOM_SOURCE.firstVisibleElement,
-        textSource: PAGE_DOM_SOURCE.elementText,
-        usableSource: PAGE_DOM_SOURCE.isUsableControl,
-    }),
-};
+    CHATGPT_DOM,
+    PAGE_DOM_SOURCE,
+    firstVisibleElement,
+    elementText,
+    isUsableControl,
+    promptInput,
+    sendButton,
+    stopButton,
+    attachButton,
+    fileInput,
+    assistantMessages,
+    userMessages,
+    uploadOverlayVisible,
+    dismissBlockingUI,
+    dismissAndSettle,
+    isPromptReady,
+    waitForEnabled,
+} = require("./chatgpt-ui");
 
 const T0 = Date.now();
 const PHASES = [];
@@ -456,23 +386,6 @@ async function isLoggedInViaCookies(context) {
     const { authed } = await readChatGptCookies(context).catch(() => ({ authed: false }));
     return authed;
 }
-
-const POPUP_DISMISS_PATTERNS = [
-    { text: /stay\s*logged\s*out/i, label: "Stay logged out" },
-    { text: /continue\s+logged\s*out/i, label: "Continue logged out" },
-    { text: /use\s+without\s+signing\s*in/i, label: "Use without signing in" },
-    { text: /use\s+chatgpt\s+without\s+an?\s+account/i, label: "Use ChatGPT without an account" },
-    { text: /continue\s+without\s+an?\s+account/i, label: "Continue without an account" },
-    { text: /continue\s+without\s+signing\s*in/i, label: "Continue without signing in" },
-    { text: /not\s+now/i, label: "Not now" },
-    { text: /maybe\s+later/i, label: "Maybe later" },
-    { text: /^skip$/i, label: "Skip" },
-    { text: /^close$/i, label: "Close" },
-    { text: /^no\s+thanks$/i, label: "No thanks" },
-    { text: /^accept\s*all$/i, label: "Accept all cookies" },
-    { text: /^got\s*it$/i, label: "Got it" },
-    { text: /^dismiss$/i, label: "Dismiss" },
-];
 
 chromium.use(stealth);
 
@@ -916,138 +829,7 @@ function cleanupTempPayloads() {
     }
 }
 
-const UPLOAD_OVERLAY_TEXT = /add\s+anything/i;
 const chipError = (name) => new Error(`attachment chip for "${name}" never appeared`);
-
-async function modalVisible(page) {
-    const modal = CHATGPT_DOM.locator(page, "noAuthModal").first();
-    if ((await modal.count()) === 0) return false;
-    return modal.isVisible().catch(() => false);
-}
-
-async function uploadOverlayVisible(page) {
-    const overlayText = page.getByText(UPLOAD_OVERLAY_TEXT).first();
-    if ((await overlayText.count()) === 0) return false;
-    return overlayText.isVisible().catch(() => false);
-}
-
-async function blockingDialogVisible(page) {
-    return page
-        .evaluate(
-            ({ modalSelector, blockerSelector, overlaySource }) => {
-                const visible = (el) =>
-                    !!el &&
-                    (typeof el.checkVisibility === "function"
-                        ? el.checkVisibility()
-                        : !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length));
-
-                if (visible(document.querySelector(modalSelector))) return true;
-                if (overlaySource && new RegExp(overlaySource, "i").test(document.body ? document.body.innerText : "")) {
-                    return true;
-                }
-                for (const el of document.querySelectorAll(blockerSelector)) {
-                    if (visible(el)) return true;
-                }
-                return false;
-            },
-            {
-                modalSelector: selector("noAuthModal"),
-                blockerSelector: selector("blockingDialog"),
-                overlaySource: UPLOAD_OVERLAY_TEXT.source,
-            }
-        )
-        .catch(() => false);
-}
-
-async function clickDismissiveButton(page) {
-    for (const pattern of POPUP_DISMISS_PATTERNS) {
-        const candidates = page
-            .locator(selector("dismissButton"))
-            .filter({ hasText: pattern.text });
-        const total = await candidates.count();
-        for (let i = 0; i < total; i++) {
-            const candidate = candidates.nth(i);
-            if (!(await candidate.isVisible().catch(() => false))) continue;
-            console.log(`>> Clicking "${pattern.label}"...`);
-            try {
-                await candidate.click({ timeout: 5000 });
-            } catch {
-                await candidate.click({ timeout: 5000, force: true }).catch(() => {});
-            }
-            return true;
-        }
-    }
-    return false;
-}
-
-async function dismissBlockingUI(page) {
-    if (!(await blockingDialogVisible(page))) {
-        console.log(">> No blocking UI detected.");
-        return false;
-    }
-
-    const sawNoAuthModal = await modalVisible(page);
-    const sawUploadOverlay = await uploadOverlayVisible(page);
-    if (sawNoAuthModal) console.log(">> No-auth popup detected.");
-    if (sawUploadOverlay) console.log(">> Upload overlay detected.");
-    let dismissed = false;
-    let escapedOnce = false;
-
-    async function pressEscape() {
-        console.log(">> Pressing Escape to dismiss blocking UI...");
-        await page.keyboard.press("Escape");
-        await page.waitForTimeout(1000);
-        dismissed = true;
-    }
-
-    if (await blockingDialogVisible(page)) {
-        await pressEscape();
-        escapedOnce = true;
-        if (!(await blockingDialogVisible(page))) {
-            console.log(">> Blocking UI cleared after Escape.");
-        }
-    }
-
-    for (let attempt = 0; attempt < 5; attempt++) {
-        if (!(await blockingDialogVisible(page))) {
-            console.log(">> Blocking UI cleared after dismiss attempts.");
-            break;
-        }
-
-        const clicked = await clickDismissiveButton(page);
-        if (!clicked) {
-            console.log(">> No matching dismissive button found, stopping button attempts.");
-            break;
-        }
-        dismissed = true;
-
-        await page
-            .locator(selector("noAuthModal"))
-            .first()
-            .waitFor({ state: "hidden", timeout: 8000 })
-            .catch(() => {});
-        await page.waitForTimeout(500);
-    }
-
-    if (await blockingDialogVisible(page) && !escapedOnce) {
-        console.log(">> Blocking UI still present, pressing Escape as fallback...");
-        await pressEscape();
-    }
-
-    if (sawNoAuthModal && !(await modalVisible(page))) {
-        console.log(">> No-auth popup dismissed.");
-    }
-    if (sawUploadOverlay && !(await uploadOverlayVisible(page))) {
-        console.log(">> Upload overlay dismissed.");
-    }
-
-    return dismissed;
-}
-
-async function dismissAndSettle(page, ms = 1000) {
-    await dismissBlockingUI(page);
-    await page.waitForTimeout(ms);
-}
 
 async function focusComposer(input) {
     await input.click();
@@ -1145,22 +927,6 @@ async function gotoChatGPT(page, targetUrl = URL) {
     throw lastError;
 }
 
-async function isPromptReady(page) {
-    const input = promptInput(page);
-    if ((await input.count()) === 0) return false;
-    if (!(await input.isVisible().catch(() => false))) return false;
-
-    const enabled = await page
-        .evaluate(({ selector, finderSource, usableSource }) => {
-            const el = eval(finderSource)(selector);
-            return eval(usableSource)(el) && el.offsetParent !== null;
-        }, CHATGPT_DOM.promptPayload())
-        .catch(() => false);
-    if (!enabled) return false;
-
-    return !(await modalVisible(page));
-}
-
 async function waitForChatGPTReady(page, targetUrl = URL, context = null) {
     console.log(">> Opening ChatGPT...");
     let loggedIn = context ? await isLoggedInViaCookies(context) : null;
@@ -1214,56 +980,6 @@ async function waitForChatGPTReady(page, targetUrl = URL, context = null) {
     await page.waitForTimeout(500);
     console.log(">> Prompt input ready.");
     return input;
-}
-
-async function waitForEnabled(page, input) {
-    await page.waitForFunction(
-        ({ selector, finderSource, usableSource }) => {
-            const el = eval(finderSource)(selector);
-            return eval(usableSource)(el) && el.offsetParent !== null;
-        },
-        CHATGPT_DOM.promptPayload(),
-        { timeout: 20000 }
-    );
-}
-
-async function waitForPromptInput(page) {
-    const input = promptInput(page);
-
-    try {
-        await input.waitFor({ state: "visible", timeout: 20000 });
-        await waitForEnabled(page, input);
-
-        try {
-            await input.click({ timeout: 5000, force: true });
-        } catch {
-            await dismissBlockingUI(page);
-            await input.waitFor({ state: "visible", timeout: 15000 });
-            await waitForEnabled(page, input);
-            await input.click({ timeout: 10000 });
-        }
-
-        await page.waitForTimeout(500);
-        return input;
-    } catch {
-        console.log(">> No prompt box found. Log in to ChatGPT in the opened browser window...");
-        const startTime = Date.now();
-        const maxWait = 10 * 60 * 1000;
-
-        while (Date.now() - startTime < maxWait) {
-            await page.waitForTimeout(2000);
-            await dismissBlockingUI(page);
-            try {
-                await input.waitFor({ state: "visible", timeout: 5000 });
-                await waitForEnabled(page, input);
-                await input.click({ timeout: 5000, force: true });
-                await page.waitForTimeout(500);
-                return input;
-            } catch {}
-        }
-
-        throw new Error("Prompt input not found within timeout. Please log in manually.");
-    }
 }
 
 async function attachmentChipProbe(page, fileName) {
