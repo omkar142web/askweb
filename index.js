@@ -438,7 +438,7 @@ const isOnAuthPage = (page) => {
     return url.includes("/auth/login") || url.includes("/auth/signin");
 };
 
-const AUTH_COOKIE_NAMES = [
+const AUTH_COOKIE_PREFIXES = [
     "__Secure-next-auth.session-token",
     "next-auth.session-token",
     "authjs.session-token",
@@ -446,9 +446,9 @@ const AUTH_COOKIE_NAMES = [
 
 async function readChatGptCookies(context) {
     const cookies = await context.cookies("https://chatgpt.com").catch(() => []);
-    const names = new Set(cookies.map((cookie) => cookie.name));
-    const hasSession = (name) => names.has(name);
-    const present = AUTH_COOKIE_NAMES.filter(hasSession);
+    const present = AUTH_COOKIE_PREFIXES.filter((prefix) =>
+        cookies.some((c) => c.name === prefix || c.name.startsWith(prefix + "."))
+    );
     return { cookies, present, authed: present.length > 0 };
 }
 
