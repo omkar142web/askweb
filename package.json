@@ -27,7 +27,7 @@
   "type": "commonjs",
   "repository": {
     "type": "git",
-    "url": "https://github.com/omkar142web/askweb.git"
+    "url": "git+https://github.com/omkar142web/askweb.git"
   },
   "homepage": "https://github.com/omkar142web/askweb#readme",
   "bugs": {
