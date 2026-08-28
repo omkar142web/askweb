@@ -890,12 +890,15 @@ const DECODE_NOTE = '\n\nAny <file> block with encoding="base64" contains base64
 const ACTIVE_TEMP_FILES = [];
 
 function stageTempPayload(payload) {
+    const stageStart = Date.now();
     try {
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), "askweb-payload-"));
         const file = path.join(dir, "payload.md");
         fs.writeFileSync(file, payload, "utf8");
         ACTIVE_TEMP_FILES.push(dir);
+        const stageMs = Date.now() - stageStart;
         console.log(`>> Temp payload staged: ${file} (${(payload.length / 1024).toFixed(1)} KB).`);
+        if (stageMs >= 50) console.log(`>> [timing] stageTempPayload=${(stageMs/1000).toFixed(1)}s`);
         return { name: "payload.md", fullPath: file, isText: true, content: payload, truncated: false };
     } catch (error) {
         console.log(`>> Failed to stage temp payload: ${error.message}`);
@@ -1338,6 +1341,7 @@ async function waitForAttachmentChip(page, firstName) {
         }
         await page.waitForTimeout(700);
     }
+    console.log(`>> [timing] waitForAttachmentChip: TIMEOUT after 25.0s`);
     return false;
 }
 
@@ -1411,26 +1415,54 @@ async function attachViaFileInput(page, files) {
     if (count === 0) throw new Error("no input[type=file] in DOM");
     console.log(`>> Found ${count} file input(s), attempting file-input attach...`);
 
+    let skipped = 0;
+    let totalSetInputMs = 0;
+    let totalChipMs = 0;
     let lastError;
     for (let i = count - 1; i >= 0; i--) {
         try {
+            const setInputStart = Date.now();
             await inputs.nth(i).setInputFiles(files.map((f) => f.fullPath), { timeout: 5000 });
+            totalSetInputMs += Date.now() - setInputStart;
+
+            // Give ChatGPT a brief moment to react to the file input being set.
+            // Wrong inputs (not wired to ChatGPT's real upload UI) accept files
+            // silently without triggering any attachment chip or upload progress.
+            // Detecting this quickly avoids wasting the full 25s waitForAttachmentChip
+            // timeout on each wrong input.
+            await page.waitForTimeout(1500);
+            const quickProbe = await attachmentChipProbe(page, files[0].name);
+
+            if (!quickProbe.present && !quickProbe.uploading) {
+                console.log(`>> Input ${i} produced no upload activity, skipping...`);
+                skipped += 1;
+                continue;
+            }
+
+            // This input triggered an upload - wait for the full chip appearance
+            const chipStart = Date.now();
             if (!(await waitForAttachmentChip(page, files[0].name))) {
                 throw chipError(files[0].name);
             }
+            totalChipMs += Date.now() - chipStart;
             console.log(`>> File-input attach succeeded for "${files[0].name}".`);
+            console.log(`>> [timing] file-input: setInputFiles=${(totalSetInputMs/1000).toFixed(1)}s, attachment-detection=${(totalChipMs/1000).toFixed(1)}s, skipped=${skipped} input(s)`);
             return;
         } catch (error) {
             lastError = error;
+            skipped += 1;
         }
     }
     throw lastError || new Error("input[type=file] attach failed");
 }
 
 async function attachFiles(page, files) {
+    const attachStart = Date.now();
     await dismissBlockingUI(page);
     try {
         await attachViaFileInput(page, files);
+        const ms = Date.now() - attachStart;
+        console.log(`>> [timing] attachFiles (file-input) total=${(ms/1000).toFixed(1)}s`);
         return "file-input";
     } catch (inputError) {
         if (await uploadOverlayVisible(page)) {
@@ -1440,6 +1472,8 @@ async function attachFiles(page, files) {
         console.log(`>> File-input attach failed (${firstLine(inputError)}), trying chooser...`);
         try {
             await attachViaChooser(page, files);
+            const ms = Date.now() - attachStart;
+            console.log(`>> [timing] attachFiles (chooser) total=${(ms/1000).toFixed(1)}s`);
             return "chooser";
         } catch (chooserError) {
             if (await uploadOverlayVisible(page)) {
@@ -1449,6 +1483,8 @@ async function attachFiles(page, files) {
             console.log(`>> Chooser attach failed (${firstLine(chooserError)}), trying drag/drop...`);
             try {
                 await attachViaDrop(page, files);
+                const ms = Date.now() - attachStart;
+                console.log(`>> [timing] attachFiles (drop) total=${(ms/1000).toFixed(1)}s`);
                 return "drop";
             } catch (dropError) {
                 await dismissBlockingUI(page);
