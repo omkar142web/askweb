@@ -354,6 +354,9 @@ const SELECTORS = {
         '[data-testid*="modal"]',
         '[class*="modal"]',
         '[class*="popover"]',
+        '[data-testid*="sign"]',
+        '[data-testid*="login"]',
+        '[data-testid*="auth"]',
     ],
     noAuthModal: ['[data-testid="modal-no-auth-login"]'],
     dismissButton: ['button', '[role="button"]', 'a'],
@@ -472,6 +475,9 @@ const POPUP_DISMISS_PATTERNS = [
     { text: /^accept\s*all$/i, label: "Accept all cookies" },
     { text: /^got\s*it$/i, label: "Got it" },
     { text: /^dismiss$/i, label: "Dismiss" },
+    { text: /^log\s*in$/i, label: "Log in" },
+    { text: /^sign\s*in$/i, label: "Sign in" },
+    { text: /^continue\s+with/i, label: "Continue with" },
 ];
 
 chromium.use(stealth);
@@ -1046,6 +1052,39 @@ async function dismissAndSettle(page, ms = 1000) {
     await page.waitForTimeout(ms);
 }
 
+async function dismissLoginPopups(page) {
+    // Check for common login-related dialogs and dismiss with Escape
+    const hasLoginDialog = await page
+        .evaluate(() => {
+            const selectors = [
+                '[data-testid*="sign"]',
+                '[data-testid*="login"]',
+                '[data-testid*="auth"]',
+                '[role="dialog"]',
+                '[aria-modal="true"]',
+                '[class*="modal"]',
+                '[class*="popover"]',
+            ];
+            for (const sel of selectors) {
+                const el = document.querySelector(sel);
+                if (el && (el.checkVisibility?.() ?? (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0))) {
+                    const text = (el.textContent || "").toLowerCase();
+                    if (/sign\s*in|log\s*in|auth|login|continue\s+with|welcome back/.test(text)) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        })
+        .catch(() => false);
+
+    if (hasLoginDialog) {
+        console.log(">> Login dialog detected, pressing Escape...");
+        await page.keyboard.press("Escape");
+        await page.waitForTimeout(800);
+    }
+}
+
 async function focusComposer(input) {
     await input.click();
     await input.focus();
@@ -1175,6 +1214,11 @@ async function waitForChatGPTReady(page, targetUrl = URL, context = null) {
         if (await isPromptReady(page)) break;
         await dismissBlockingUI(page);
         if (await isPromptReady(page)) break;
+
+        // Aggressive: try to dismiss any login-related dialogs that might not be caught by blockingDialogVisible
+        if (!(await isOnAuthPage(page))) {
+            await dismissLoginPopups(page);
+        }
 
         if (Date.now() - lastNotice > 15000) {
             lastNotice = Date.now();
