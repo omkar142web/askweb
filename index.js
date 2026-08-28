@@ -500,7 +500,7 @@ Options:
       --append            Append the answer after existing content in the output file
       --prepend           Prepend the answer before existing content in the output file
       --login             Open ChatGPT to log in and save the session
-      --logout            Open ChatGPT to log out (manual, 10 min)
+      --logout            Open ChatGPT to log out (manual, up to 10 min)
       --continue [id]      Continue the most recent conversation, or a specific one by id prefix
       --new               Start a fresh conversation instead of continuing
       --prompts           Open the Prompt Manager (add/edit/rename/delete/view)
@@ -2292,11 +2292,25 @@ async function runLoginFlow(page, context = null) {
     throw new Error("Login timed out after 10 minutes. Please try again.");
 }
 
-async function runLogoutFlow(page) {
-    console.log(">> Opening ChatGPT. You have up to 10 min to log out or do anything else...");
+async function runLogoutFlow(page, context = null) {
+    console.log(">> Opening ChatGPT. Please log out manually...");
     await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await page.waitForTimeout(10 * 60 * 1000);
-    console.log(">> Time's up. Closing browser.");
+    await page.waitForTimeout(2000);
+
+    const startTime = Date.now();
+    const maxWait = 10 * 60 * 1000;
+
+    while (Date.now() - startTime < maxWait) {
+        await page.waitForTimeout(2000);
+
+        const loggedInByCookie = context ? await isLoggedInViaCookies(context) : false;
+        if (!loggedInByCookie) {
+            console.log(">> Logout detected via session cookie. Session cleared.");
+            return;
+        }
+    }
+
+    throw new Error("Logout timed out after 10 minutes. Please try again.");
 }
 
 function markProfileClean(profileDir) {
@@ -2670,7 +2684,7 @@ async function main() {
         const context = await launchBrowser();
         const page = context.pages()[0] || await context.newPage();
         try {
-            await runLogoutFlow(page);
+            await runLogoutFlow(page, context);
         } finally {
             await context.close();
         }
