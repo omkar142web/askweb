@@ -1398,7 +1398,7 @@ async function attachViaDrop(page, files) {
 async function attachViaChooser(page, files) {
     console.log(">> Attempting file chooser attach...");
     const chooserPromise = page.waitForEvent("filechooser", { timeout: 6000 });
-    await CHATGPT_DOM.locator(page, "attachButton").first().click();
+    await attachButton(page).click();
 
     let chooser;
     try {
@@ -1425,7 +1425,7 @@ async function attachViaChooser(page, files) {
 }
 
 async function attachViaFileInput(page, files) {
-    const inputs = CHATGPT_DOM.locator(page, "fileInput");
+    const inputs = fileInput(page);
     const count = await inputs.count();
     if (count === 0) throw new Error("no input[type=file] in DOM");
     console.log(`>> Found ${count} file input(s), attempting file-input attach...`);
@@ -1471,6 +1471,13 @@ async function attachViaFileInput(page, files) {
     throw lastError || new Error("input[type=file] attach failed");
 }
 
+async function rejectIfUploadOverlay(page, fileName) {
+    if (await uploadOverlayVisible(page)) {
+        await dismissBlockingUI(page);
+        throw new Error(`upload overlay rejected "${fileName}"`);
+    }
+}
+
 async function attachFiles(page, files) {
     const attachStart = Date.now();
     await dismissBlockingUI(page);
@@ -1480,10 +1487,7 @@ async function attachFiles(page, files) {
         console.log(`>> [timing] attachFiles (file-input) total=${(ms/1000).toFixed(1)}s`);
         return "file-input";
     } catch (inputError) {
-        if (await uploadOverlayVisible(page)) {
-            await dismissBlockingUI(page);
-            throw new Error(`upload overlay rejected "${files[0].name}"`);
-        }
+        await rejectIfUploadOverlay(page, files[0].name);
         console.log(`>> File-input attach failed (${firstLine(inputError)}), trying chooser...`);
         try {
             await attachViaChooser(page, files);
@@ -1491,10 +1495,7 @@ async function attachFiles(page, files) {
             console.log(`>> [timing] attachFiles (chooser) total=${(ms/1000).toFixed(1)}s`);
             return "chooser";
         } catch (chooserError) {
-            if (await uploadOverlayVisible(page)) {
-                await dismissBlockingUI(page);
-                throw new Error(`upload overlay rejected "${files[0].name}"`);
-            }
+            await rejectIfUploadOverlay(page, files[0].name);
             console.log(`>> Chooser attach failed (${firstLine(chooserError)}), trying drag/drop...`);
             try {
                 await attachViaDrop(page, files);
@@ -1730,11 +1731,10 @@ function buildTransmissionFinale(total, finalQuestion) {
 }
 
 async function waitForGenerationEnd(page, timeoutMs = 10 * 60 * 1000) {
-    const stopButton = CHATGPT_DOM.locator(page, "stopButton").first();
     const deadline = Date.now() + timeoutMs;
     let noticed = false;
     while (Date.now() < deadline) {
-        if (!(await stopButton.isVisible().catch(() => false))) return true;
+        if (!(await isStopVisible(page))) return true;
         if (!noticed) {
             console.log(">> Waiting for in-flight generation to settle...");
             noticed = true;
@@ -1763,6 +1763,18 @@ async function sendButtonUsable(page) {
             return !!btn && !btn.disabled && btn.getAttribute("aria-disabled") !== "true";
         }, selector("sendButton"))
         .catch(() => false);
+}
+
+async function isStopVisible(page) {
+    return stopButton(page).isVisible().catch(() => false);
+}
+
+async function waitForSendReady(page) {
+    const deadline = Date.now() + 5000;
+    while (!(await sendButtonUsable(page))) {
+        if (Date.now() > deadline) break;
+        await page.waitForTimeout(300);
+    }
 }
 
 async function transcriptContainsCloseTag(page, closeTag) {
@@ -1869,11 +1881,7 @@ async function transmitPart(page, input, part, index, total) {
         if (!(await sendButtonUsable(page))) {
             console.log(" send button not enabled yet, waiting...");
             await waitForGenerationEnd(page);
-            const sendReadyDeadline = Date.now() + 5000;
-            while (!(await sendButtonUsable(page))) {
-                if (Date.now() > sendReadyDeadline) break;
-                await page.waitForTimeout(300);
-            }
+            await waitForSendReady(page);
         }
 
         await trySend(page, sendButton(page), { requireVisible: true });
@@ -1937,11 +1945,7 @@ async function sendFinaleConfirmed(page, input, text, attempts = 3) {
             }
         }
 
-        const sendReadyDeadline = Date.now() + 5000;
-        while (!(await sendButtonUsable(page))) {
-            if (Date.now() > sendReadyDeadline) break;
-            await page.waitForTimeout(300);
-        }
+        await waitForSendReady(page);
 
         await trySend(page, sendButton(page), { requireVisible: true });
 
@@ -2216,7 +2220,7 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
     let lastProgressLog = 0;
 
     while (Date.now() < deadline) {
-        const stopVisible = await CHATGPT_DOM.locator(page, "stopButton").first().isVisible().catch(() => false);
+        const stopVisible = await isStopVisible(page);
         if (stopVisible && !sawGeneration) {
             sawGeneration = true;
             console.log(">> Generation started (stop button visible).");
@@ -2258,8 +2262,7 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
         await page.waitForTimeout(POLL_MS);
         totalPolls += 1;
 
-        const stopButton = CHATGPT_DOM.locator(page, "stopButton").first();
-        const stopVisible = await stopButton.isVisible().catch(() => false);
+        const stopVisible = await isStopVisible(page);
 
         const text = await answer.innerText().catch(() => "");
         const lastLength = text.trim().length;
