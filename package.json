@@ -1,6 +1,6 @@
 {
   "name": "rutkar",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Automate ChatGPT from the command line using a real Chromium-based browser with Playwright. Send questions, attach files, and save responses as Markdown.",
   "main": "index.js",
   "bin": {

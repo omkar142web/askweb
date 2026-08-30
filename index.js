@@ -2722,7 +2722,7 @@ function loadQuestion() {
 
 async function main() {
     if (CLI.showHelp) return showHelp();
-    if (CLI.showVersion) return console.log(`ChatGPT CLI v${VERSION}`);
+    if (CLI.showVersion) return console.log(`v${VERSION}`);
 
     if (CLI.promptCreate !== null) return createPromptFlow(CLI.promptCreate);
     if (CLI.promptsAction === "manager") return runPromptManager();
