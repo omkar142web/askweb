@@ -84,13 +84,22 @@ const POPUP_DISMISS_PATTERNS = [
 
 const UPLOAD_OVERLAY_TEXT = /add\s+anything/i;
 
+function domIsVisible(el) {
+    if (!el) return false;
+    try {
+        if (typeof el.checkVisibility === "function") {
+            return el.checkVisibility({
+                visibilityProperty: true,
+                opacityProperty: true,
+                sizeProperty: true,
+            });
+        }
+    } catch (e) {}
+    return !!(el.offsetWidth || el.offsetHeight || (el.getClientRects && el.getClientRects().length));
+}
+
 function firstVisibleElement(selector) {
-    const visible = (el) =>
-        !!el &&
-        (typeof el.checkVisibility === "function"
-            ? el.checkVisibility({ visibilityProperty: true, opacityProperty: true, sizeProperty: true })
-            : !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length));
-    return [...document.querySelectorAll(selector)].find((el) => visible(el)) || null;
+    return [...document.querySelectorAll(selector)].find(domIsVisible) || null;
 }
 
 function elementText(el) {
@@ -109,7 +118,8 @@ function isUsableControl(el) {
 }
 
 const PAGE_DOM_SOURCE = {
-    firstVisibleElement: `(${firstVisibleElement.toString()})`,
+    firstVisibleElement: `(function(){${domIsVisible.toString()};return ${firstVisibleElement.toString()}})()`,
+    domIsVisible: `(${domIsVisible.toString()})`,
     elementText: `(${elementText.toString()})`,
     isUsableControl: `(${isUsableControl.toString()})`,
 };
@@ -167,18 +177,11 @@ const POPUP_CONFIG = {
     authText: AUTH_TEXT_SIGNALS,
     composerSelectors: COMPOSER_SELECTORS,
     composerSelectorJoined: COMPOSER_SELECTORS.join(", "),
+    domIsVisibleSrc: `(${domIsVisible.toString()})`,
 };
 
 function inspectPopupImpl(cfg) {
-    function isVisible(el) {
-        if (!el) return false;
-        try {
-            if (typeof el.checkVisibility === "function") {
-                return el.checkVisibility({ visibilityProperty: true, opacityProperty: true, sizeProperty: true });
-            }
-        } catch (e) {}
-        return !!(el.offsetWidth || el.offsetHeight || (el.getClientRects && el.getClientRects().length));
-    }
+    var isVisible = eval(cfg.domIsVisibleSrc);
     function accName(el) {
         if (!el) return "";
         if (typeof el.getAttribute !== "function") return "";
@@ -298,13 +301,19 @@ async function controlDescription(loc) {
     return "button";
 }
 
+async function isUsableButton(loc) {
+    return (
+        (await loc.isVisible().catch(() => false)) &&
+        (await loc.isEnabled().catch(() => false))
+    );
+}
+
 async function findIconCloseButton(dialog) {
     const btns = dialog.locator("button, [role=button]");
     const n = await btns.count().catch(() => 0);
     for (let i = 0; i < n; i++) {
         const b = btns.nth(i);
-        if (!(await b.isVisible().catch(() => false))) continue;
-        if (!(await b.isEnabled().catch(() => false))) continue;
+        if (!(await isUsableButton(b))) continue;
         const al = await b.getAttribute("aria-label").catch(() => null);
         const txt = (await b.textContent().catch(() => "")).trim();
         if (al && al.trim()) continue;
@@ -336,8 +345,7 @@ async function findDismissControl(page) {
     for (const strategy of strategies) {
         const b = strategy().first();
         if ((await b.count().catch(() => 0)) === 0) continue;
-        if (!(await b.isVisible().catch(() => false))) continue;
-        if (!(await b.isEnabled().catch(() => false))) continue;
+        if (!(await isUsableButton(b))) continue;
         const desc = await controlDescription(b);
         return { button: b, description: desc || "close/dismiss control" };
     }
