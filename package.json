@@ -13,7 +13,9 @@
     "new": "node index.js --new",
     "cont": "node index.js --continue",
     "forget": "node index.js --clear-conversation",
-    "wipe": "node index.js --clear-conversations"
+    "wipe": "node index.js --clear-conversations",
+    "pdf": "node -e \"const {generatePDF}=require('./pdf-generator');const fs=require('fs');const text=fs.readFileSync(process.argv[2]||'output.md','utf8');generatePDF(text,{outputDir:'.'}).then(p=>console.log('PDF saved:',p)).catch(e=>{console.error(e);process.exit(1);});\"",
+    "test-pdf": "node -e \"const {generatePDF}=require('./pdf-generator');generatePDF.fromFile('test-markdown.md',{title:'PDF Test'}).then(p=>console.log('Test PDF saved:',p)).catch(e=>{console.error(e);process.exit(1);});\""
   },
   "keywords": [
     "chatgpt",
@@ -35,10 +37,19 @@
   },
   "files": [
     "index.js",
-    "chatgpt-ui.js"
+    "chatgpt-ui.js",
+    "pdf-generator.js",
+    "markdown-to-html.js",
+    "pdf-template.js",
+    "file-id-generator.js"
   ],
   "dependencies": {
+    "dompurify": "^3.4.14",
     "dotenv": "^17.4.2",
+    "highlight.js": "^11.12.0",
+    "jsdom": "^29.1.1",
+    "katex": "^0.18.4",
+    "marked": "^18.0.11",
     "playwright": "^1.62.1",
     "playwright-extra": "^4.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"
