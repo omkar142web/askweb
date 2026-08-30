@@ -338,6 +338,7 @@ const {
     dismissAndSettle,
     isPromptReady,
     waitForEnabled,
+    startPopupMonitor,
 } = require("./chatgpt-ui");
 
 const T0 = Date.now();
@@ -1238,8 +1239,9 @@ async function waitForChatGPTReady(page, targetUrl = URL, context = null) {
         if (context) {
             loggedIn = await isLoggedInViaCookies(context);
         }
-        if (await isPromptReady(page)) break;
+
         await dismissBlockingUI(page);
+
         if (await isPromptReady(page)) break;
 
         if (Date.now() - lastNotice > 15000) {
@@ -2791,6 +2793,7 @@ async function main() {
         if (extra !== page) await extra.close().catch(() => {});
     }
 
+    let popupMonitor = null;
     try {
         if (loginOnly) {
             await runLoginFlow(page, context);
@@ -2801,6 +2804,8 @@ async function main() {
                 `>> Replaying ${continuing.messages.length} saved message(s) into a fresh chat${continuing.title ? ` ("${continuing.title}")` : ""}`
             );
         }
+        popupMonitor = startPopupMonitor(page);
+        console.log(">> Popup safety monitor active (continuous blocking-UI detection).");
         const assistantCountBefore = await sendQuestion(page, question, targetUrl, context);
         const answer = await waitForAnswer(page, assistantCountBefore);
         console.log("\n--- ANSWER ---\n");
@@ -2836,6 +2841,7 @@ async function main() {
             );
         }
     } finally {
+        if (popupMonitor) popupMonitor.stop();
         cleanupTempPayloads();
         await context.close();
     }

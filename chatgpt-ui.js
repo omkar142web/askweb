@@ -488,6 +488,38 @@ async function isPromptReady(page) {
     return state.composerVisible && state.composerUsable && !state.hasAuthPopup;
 }
 
+function startPopupMonitor(page, { intervalMs = 1000 } = {}) {
+    let active = true;
+    let timer = null;
+    let tickCount = 0;
+
+    async function tick() {
+        if (!active) return;
+        try {
+            await dismissBlockingUI(page);
+        } catch (error) {
+            // The page or browser context may be closing; never let the
+            // safety monitor crash the running automation.
+        }
+        tickCount++;
+        if (active) {
+            timer = setTimeout(tick, intervalMs);
+            if (timer.unref) timer.unref();
+        }
+    }
+
+    timer = setTimeout(tick, intervalMs);
+    if (timer.unref) timer.unref();
+
+    return {
+        stop() {
+            active = false;
+            if (timer) clearTimeout(timer);
+        },
+        tickCount: () => tickCount,
+    };
+}
+
 module.exports = {
     SELECTORS,
     selector,
@@ -515,6 +547,7 @@ module.exports = {
     dismissAndSettle,
     isPromptReady,
     waitForEnabled,
+    startPopupMonitor,
     isUploadOverlay,
     uploadOverlayVisible: isUploadOverlay,
     modalVisible: hasAuthPopup,

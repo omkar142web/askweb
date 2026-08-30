@@ -142,6 +142,40 @@ function closeBtn(opts = {}) {
         );
         const r3 = await ui.dismissAuthPopup(page);
         check("obscured-control: recovers (escape clears cover, click then succeeds)", r3.dismissed === true);
+
+        // 15. Background popup safety monitor: dismisses a popup that appears AFTER the composer is ready
+        await page.setContent(`<div id="app">${COMP}</div>`);
+        const monitor = ui.startPopupMonitor(page, { intervalMs: 1000 });
+        await page.waitForTimeout(1200);
+        check("monitor: ran initial no-op tick", monitor.tickCount() >= 1);
+        check("monitor: no popup initially", !(await ui.hasAuthPopup(page)));
+        check("monitor: composer ready initially", await ui.isPromptReady(page));
+
+        await page.evaluate(() => {
+            const d = document.createElement("div");
+            d.id = "auth";
+            d.setAttribute("data-testid", "modal-no-auth-login");
+            d.setAttribute("role", "dialog");
+            d.setAttribute("aria-modal", "true");
+            d.style.cssText = "position:fixed;inset:5%;background:#fff;border:1px solid #333";
+            d.innerHTML = `<h2>Sign in to ChatGPT</h2><button id="cb" aria-label="Close" onclick="document.getElementById('auth')&&document.getElementById('auth').remove()"><svg width="12" height="12"><circle r="6"/></svg></button>`;
+            document.body.appendChild(d);
+        });
+
+        check("monitor: popup present after injection", (await ui.inspectPopup(page)).hasAuthPopup);
+
+        const dismissed = await page
+            .waitForFunction(() => !document.querySelector("#auth"), { timeout: 5000 })
+            .then(() => true)
+            .catch(() => false);
+        check("monitor: late popup dismissed by background monitor", dismissed);
+        check("monitor: no auth popup after dismissal", !(await ui.hasAuthPopup(page)));
+        check("monitor: composer ready after dismissal", await ui.isPromptReady(page));
+
+        await page.waitForTimeout(800);
+        check("monitor: tickCount increased after dismissal", monitor.tickCount() > 1);
+
+        monitor.stop();
     } finally {
         await b.close();
     }
