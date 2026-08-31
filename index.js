@@ -666,7 +666,7 @@ const OPTION_DEFINITIONS = [
     {
         flags: ["--dry-run"],
         desc: "Print the exact prompt payload that would be sent to ChatGPT, then exit. No browser is launched and nothing is sent.",
-        note: "Cannot be combined with --login. Cannot be combined with --logout.",
+        note: "Cannot be combined with standalone actions: --login, --logout, --browser, --browser-order, --browser-reset, --prompts, --prompt-create, --clear-conversations, or --clear-conversation.",
         example: 'askweb --dry-run "Explain closures"',
     },
     {
@@ -2745,7 +2745,7 @@ async function main() {
     if (CLI.showVersion) return console.log(`v${VERSION}`);
 
     if (CLI.dryRun && (CLI.login || CLI.logout || CLI.configureBrowser || CLI.configureBrowserOrder || CLI.resetBrowserPrefs || CLI.promptsAction === "manager" || CLI.promptCreate !== null || CLI.clearConversations || CLI.clearConversationId)) {
-        console.log(">> --dry-run can only be combined with a question (optionally with files or a preset). It cannot be combined with standalone actions like --login, --logout, --browser, --prompts, --prompt-create, --clear-conversations, or --clear-conversation. Exiting without performing any action.");
+        console.log(">> --dry-run can only be combined with a question (optionally with files or a preset). It cannot be combined with standalone actions like --login, --logout, --browser, --browser-order, --browser-reset, --prompts, --prompt-create, --clear-conversations, or --clear-conversation. Exiting without performing any action.");
         return;
     }
 
@@ -2796,10 +2796,6 @@ async function main() {
     }
 
     if (CLI.dryRun) {
-        if (loginOnly) {
-            console.log(">> --dry-run cannot inspect a payload when --login is used (no question is sent). Exiting without launching a browser.");
-            return;
-        }
         const payload = buildFullPrompt(question);
         process.stdout.write("\n--- DRY RUN: PROMPT THAT WOULD BE SENT TO CHATGPT ---\n");
         process.stdout.write(payload);
