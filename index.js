@@ -2446,6 +2446,13 @@ function clearConversationById(idPrefix) {
         console.log(`>> No saved conversation matches id "${idPrefix}".`);
         return;
     }
+    if (matches.length > 1) {
+        console.log(`>> Multiple conversations match id prefix "${idPrefix}". Use a longer prefix to be specific:`);
+        for (const conversation of matches) {
+            console.log(`   - ${conversation.id}${conversation.title ? ` ("${conversation.title}")` : ""}`);
+        }
+        return;
+    }
     const matchedIds = new Set(matches.map((conversation) => conversation.id));
     data.conversations = data.conversations.filter((conversation) => !matchedIds.has(conversation.id));
     saveConversations(data);
