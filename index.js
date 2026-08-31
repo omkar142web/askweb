@@ -2719,6 +2719,13 @@ async function launchBrowser() {
                     "--no-default-browser-check",
                 ],
             });
+            if (wantsClearSession()) {
+                // clearSessionData() above only wipes Local Storage LevelDB files.
+                // ChatGPT auth is cookie-based, so we must also clear cookies here
+                // — after context creation so Playwright's API is available.
+                await context.clearCookies();
+                console.log(`>> --clear-session: cleared browser cookies for ${browser.name}`);
+            }
             console.log(`>> Browser: ${browser.name} (profile: ${browser.profileDir})`);
             return context;
         } catch (error) {
