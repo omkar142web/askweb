@@ -9,6 +9,8 @@ askweb controls a persistent browser session, so the same browser profile and (o
 - CLI-driven ChatGPT automation with a persistent browser profile
 - Question submission with retry logic and UI-state validation
 - File attachment support: text/code files pasted inline, binary files uploaded (when logged in)
+- **Local commands** (`--cmd`) — run a shell command and pipe its output into the prompt sent to ChatGPT
+- **Dry runs** (`--dry-run`) — preview the exact prompt payload that would be sent, without launching a browser
 - Prompt presets as native flags (`--explain`, `--find-error`, ...), with a built-in and a custom (editable) set
 - Append/prepend answer output to an existing file (`--append` / `--prepend`)
 - Multiple browser fallback: Chrome, Brave, Edge (configurable order and default)
@@ -97,6 +99,12 @@ node index.js "Compare these files" file1.json file2.tsx
 node index.js --explain "JavaScript closures"
 node index.js --find-error src/index.js
 
+# Run a local shell command and reason over its output
+node index.js --cmd "git status" "Explain the current repository state."
+
+# Preview the payload that would be sent (no browser launched)
+node index.js --dry-run "Explain closures"
+
 # Continue the most recent conversation
 node index.js --continue "Follow up question"
 
@@ -154,6 +162,8 @@ A new user can run `node index.js --help` for the full in-tool mini-manual.
 | `--clear-conversation` | `<id>` | Delete one saved conversation by id (prefix match). Also accepts `--clear-conversation=<id>`. |
 | `-h`, `--help` | — | Show help. |
 | `-v`, `--version` | — | Show the version. |
+| `--dry-run` | — | Print the exact prompt payload that would be sent to ChatGPT, then exit. No browser is launched and nothing is sent. |
+| `--cmd` | `<command>` | Execute a local shell command and include its stdout/stderr in the prompt. Can be repeated. Each command runs with a 30s timeout, capped at `ASKWEB_MAX_CMD_OUTPUT` chars per stream. |
 | `--` | — | Stop option parsing; tokens after it are the question/files literally. |
 
 ### Combinations to avoid
@@ -163,6 +173,38 @@ A new user can run `node index.js --help` for the full in-tool mini-manual.
 - Only one prompt preset may be used per run (`--explain --review` is rejected).
 - `--output` and `--clear-conversation` each require their argument.
 - `--continue=<id>` is not supported; use a space: `--continue <id>`.
+- `--dry-run` cannot be combined with standalone actions (`--login`, `--logout`,
+  `--browser`, `--browser-order`, `--browser-reset`, `--prompts`,
+  `--prompt-create`, `--clear-conversations`, `--clear-conversation`).
+
+## Local Commands (`--cmd`)
+
+`--cmd` runs a local shell command and folds its stdout/stderr into the prompt
+sent to ChatGPT as a `<command name="...">` block. Combine with a question to
+ask about the command's output. The flag can be repeated for multiple commands.
+
+```bash
+node index.js --cmd "git status" "Explain the current repository state."
+node index.js --cmd "git diff" --cmd "git status" "Review my changes."
+node index.js --cmd "git log -5" "Summarize the recent changes."
+```
+
+- Each command runs with your user's permissions and a 30s timeout.
+- Output is capped at `ASKWEB_MAX_CMD_OUTPUT` characters per stream (default
+  `100000`, i.e. 100 KB). Set the variable to override.
+- Obvious destructive patterns (`rm -rf /`, `mkfs`, etc.) are blocked.
+
+## Dry Run (`--dry-run`)
+
+`--dry-run` builds the prompt payload exactly as it would be sent (question,
+attached/inlined files, command results, and any `<file>` blocks) and prints it
+to stdout, then exits. No browser is launched and nothing is sent to ChatGPT.
+This is useful for inspecting how files and `--cmd` outputs are assembled
+before committing tokens to a real run.
+
+```bash
+node index.js --dry-run "Review this" src/index.js
+```
 
 ## Prompt Presets
 
@@ -255,6 +297,9 @@ Each entry stores:
 - `url`
 - `title`
 - `updatedAt`
+- `delivery` *(optional, present only when the payload was large)* —
+  `mode`: `"chunked"` (anonymous multi-part) or `"attachment"` (uploaded as
+  a single file), plus `parts`/`chars` (chunked) or `chars` (attachment)
 - `messages[]`
 
 Use `--continue` to replay the most recent conversation's full transcript into a
@@ -350,13 +395,16 @@ then any remaining defaults.
 | Variable | Description |
 | --- | --- |
 | `ASKWEB_CHUNK_SIZE` | Force the part size (in characters) used by the anonymous multi-part transmission path. Only used when a payload exceeds the single-message budget (~25 KB). |
+| `ASKWEB_MAX_CMD_OUTPUT` | Maximum characters to capture per command output stream (stdout or stderr) when using `--cmd`. Output beyond this is truncated with an explicit marker in the prompt. Default: `100000` (100 KB). |
 
 ```bash
 # Windows
 $env:ASKWEB_CHUNK_SIZE=40000; node index.js "long question"
+$env:ASKWEB_MAX_CMD_OUTPUT=20000; node index.js --cmd "git log"
 
 # Unix
 ASKWEB_CHUNK_SIZE=40000 node index.js "long question"
+ASKWEB_MAX_CMD_OUTPUT=20000 node index.js --cmd "git log"
 ```
 
 ## Known Issues
