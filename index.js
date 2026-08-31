@@ -7,6 +7,7 @@ const path = require("path");
 const os = require("os");
 const readline = require("readline");
 const crypto = require("crypto");
+const { spawnSync } = require("child_process");
 const { chromium } = require("playwright-extra");
 const stealth = require("puppeteer-extra-plugin-stealth")();
 
@@ -53,8 +54,12 @@ const PROMPT_NAME_RE = /^[-a-z0-9_]+$/i;
 const RESERVED_PROMPT_FLAGS = new Set([
     "o", "output", "login", "continue", "new", "browser", "browser-order", "browser-reset",
     "clear-session", "clear-conversations", "clear-conversation", "help", "h", "version", "v",
-    "prompts", "prompt-create", "append", "prepend", "logout", "dry-run",
+    "prompts", "prompt-create", "append", "prepend", "logout", "dry-run", "cmd",
 ]);
+
+const CMD_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_CMD_OUTPUT = 100_000;
+const DESTRUCTIVE_CMD_RE = /(?:rm\s+-rf\s+\/|rm\s+-rf\s+~|mkfs\b|dd\s+if=\/dev\/zero|:\(\)\s*\{\s*:\|:&\s*\}|chmod\s+-R\s+777\s+\/)/;
 
 const BUILTIN_PROMPTS = {
     "find-error":
@@ -392,6 +397,155 @@ chromium.use(stealth);
 
 const VERSION = require("./package.json").version;
 
+function escapeXml(str) {
+    return str
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+function resolveMaxCmdOutput() {
+    const env = process.env.ASKWEB_MAX_CMD_OUTPUT;
+    const parsed = Number(env);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEFAULT_MAX_CMD_OUTPUT;
+}
+
+function isDestructiveCommand(command) {
+    return DESTRUCTIVE_CMD_RE.test(command);
+}
+
+function runLocalCommand(command) {
+    const maxOutput = resolveMaxCmdOutput();
+    const start = Date.now();
+    let stdout = "";
+    let stderr = "";
+    let exitCode = null;
+    let timedOut = false;
+
+    const result = spawnSync(command, {
+        timeout: CMD_TIMEOUT_MS,
+        encoding: "utf8",
+        shell: true,
+        maxBuffer: 10 * 1024 * 1024,
+    });
+
+    stdout = result.stdout || "";
+    stderr = result.stderr || "";
+    exitCode = result.status ?? 0;
+
+    if (result.error) {
+        stderr = (stderr ? stderr + "\n" : "") + result.error.message;
+        exitCode = result.status ?? 1;
+    }
+    if (result.signal === "SIGTERM" || result.signal === "SIGKILL" || result.error?.code === "ETIMEDOUT") {
+        timedOut = true;
+        exitCode = -1;
+    }
+
+    return {
+        command,
+        stdout,
+        stderr,
+        exitCode,
+        timedOut,
+        success: exitCode === 0 && !timedOut,
+        durationMs: Date.now() - start,
+        maxOutput,
+        blocked: false,
+    };
+}
+
+function formatCommandResult(result) {
+    const truncatedStdout = result.stdout.length > result.maxOutput;
+    const truncatedStderr = result.stderr.length > result.maxOutput;
+    const displayStdout = truncatedStdout ? result.stdout.slice(0, result.maxOutput) : result.stdout;
+    const displayStderr = truncatedStderr ? result.stderr.slice(0, result.maxOutput) : result.stderr;
+
+    let block = `<command name="${escapeXml(result.command)}">\n`;
+    block += `<exit_code>${result.exitCode}</exit_code>\n`;
+    if (result.timedOut) {
+        block += `<timed_out>true</timed_out>\n`;
+    }
+    block += `<status>${result.success ? "success" : "failed"}</status>\n`;
+    if (truncatedStdout || truncatedStderr) {
+        block += `<truncated>true</truncated>\n`;
+        block += `<truncation_note>Output was truncated to ${result.maxOutput.toLocaleString()} characters per stream. Set ASKWEB_MAX_CMD_OUTPUT to override.</truncation_note>\n`;
+    }
+    if (result.blocked) {
+        block += `<blocked>true</blocked>\n`;
+    }
+    block += `<stdout>\n${escapeXml(displayStdout)}</stdout>\n`;
+    if (displayStderr) {
+        block += `<stderr>\n${escapeXml(displayStderr)}</stderr>\n`;
+    }
+    block += `</command>`;
+    return block;
+}
+
+async function executeCommands(commands) {
+    if (!commands || commands.length === 0) return [];
+
+    const results = [];
+    for (const command of commands) {
+        console.log(`>> Executing command: ${command}`);
+
+        if (isDestructiveCommand(command)) {
+            console.log(`>> WARNING: Skipping potentially destructive command: ${command}`);
+            results.push({
+                command,
+                stdout: "",
+                stderr: "Blocked: command matches a known destructive pattern and was not executed.",
+                exitCode: -1,
+                timedOut: false,
+                success: false,
+                durationMs: 0,
+                maxOutput: resolveMaxCmdOutput(),
+                blocked: true,
+            });
+            continue;
+        }
+
+        try {
+            const result = runLocalCommand(command);
+            const totalChars = result.stdout.length + result.stderr.length;
+            if (result.success) {
+                console.log(`>> Command finished (exit=${result.exitCode}, ${totalChars} chars, ${result.durationMs}ms).`);
+            } else {
+                console.log(`>> Command exited with code ${result.exitCode}${result.timedOut ? " (timed out)" : ""} (${totalChars} chars, ${result.durationMs}ms).`);
+                if (result.stderr) {
+                    console.log(`>> stderr: ${result.stderr.slice(0, 200)}${result.stderr.length > 200 ? "..." : ""}`);
+                }
+            }
+            results.push(result);
+        } catch (error) {
+            console.log(`>> Command execution error: ${firstLine(error)}`);
+            results.push({
+                command,
+                stdout: "",
+                stderr: error.message,
+                exitCode: -1,
+                timedOut: false,
+                success: false,
+                durationMs: 0,
+                maxOutput: resolveMaxCmdOutput(),
+                blocked: false,
+            });
+        }
+    }
+    return results;
+}
+
+function buildTextPayload(question) {
+    const commandBlocks = (question.commandResults || [])
+        .map(formatCommandResult)
+        .join("\n\n");
+    const parts = [];
+    if (commandBlocks) parts.push(commandBlocks);
+    if (question.text) parts.push(question.text);
+    return parts.join("\n\n");
+}
+
 const OPTION_DEFINITIONS = [
     {
         flags: ["-o", "--output"],
@@ -515,6 +669,14 @@ const OPTION_DEFINITIONS = [
         note: "Cannot be combined with --login. Cannot be combined with --logout.",
         example: 'askweb --dry-run "Explain closures"',
     },
+    {
+        flags: ["--cmd"],
+        arg: "<command>",
+        argRequired: true,
+        desc: "Execute a local shell command and include its stdout/stderr output in the prompt sent to ChatGPT.",
+        note: "Can be repeated for multiple commands. Each command runs with a 30s timeout and is capped at ASKWEB_MAX_CMD_OUTPUT characters per stream (default 100 KB). Obvious destructive patterns are blocked.",
+        example: 'askweb --cmd "git status" "Explain the current repository state."',
+    },
 ];
 
 function renderOption(def) {
@@ -595,6 +757,7 @@ function parseCliArgs(argv = process.argv.slice(2)) {
         outputFile: DEFAULT_OUTPUT_FILE,
         outputMode: "overwrite",
         questionArgs: [],
+        commands: [],
     };
 
     for (let i = 0; i < argv.length; i++) {
@@ -684,6 +847,23 @@ function parseCliArgs(argv = process.argv.slice(2)) {
 
         if (arg === "--version" || arg === "-v") {
             options.showVersion = true;
+            continue;
+        }
+
+        if (arg === "--cmd") {
+            const value = argv[i + 1];
+            if (!value || value.startsWith("-")) {
+                throw new Error(`${arg} requires a command string (use ${arg}=<command> to pass a value starting with "-")`);
+            }
+            options.commands.push(stripShellQuotes(value));
+            i++;
+            continue;
+        }
+
+        if (arg.startsWith("--cmd=")) {
+            const value = arg.slice("--cmd=".length);
+            if (!value) throw new Error("--cmd requires a command string");
+            options.commands.push(stripShellQuotes(value));
             continue;
         }
 
@@ -826,7 +1006,7 @@ function parseQuestion(args = CLI.questionArgs) {
             );
         }
     } else {
-        text = extra || DEFAULT_QUESTION;
+        text = extra || (CLI.commands.length > 0 ? "Analyze and summarize the following command output." : DEFAULT_QUESTION);
     }
 
     return { text, files: fileRefs };
@@ -1322,11 +1502,21 @@ async function attachFiles(page, files) {
     }
 }
 
-function buildFullPrompt(question) {
-    const blocks = question.files.map(fileBlock).join("");
-    const hasBinary = question.files.some((file) => !file.isText);
-    const body = hasBinary ? blocks + DECODE_NOTE : blocks;
-    return question.text ? `${question.text}\n${body}` : body;
+function buildFullPrompt(question, options = {}) {
+    const { includeFiles = true } = options;
+    const commandBlocks = (question.commandResults || [])
+        .map(formatCommandResult)
+        .join("\n\n");
+    const parts = [];
+    if (commandBlocks) parts.push(commandBlocks);
+    if (question.text) parts.push(question.text);
+    if (includeFiles) {
+        const filesBlocks = question.files.map(fileBlock).join("");
+        const hasBinary = question.files.some((file) => !file.isText);
+        if (filesBlocks) parts.push(filesBlocks);
+        if (hasBinary) parts.push(DECODE_NOTE);
+    }
+    return parts.join("\n\n");
 }
 
 const COMPOSER_CHUNK = 16000;
@@ -1846,7 +2036,7 @@ async function sendQuestion(page, question, targetUrl = URL, context = null) {
         await dismissAndSettle(page);
     }
 
-    const payload = attached ? question.text : buildFullPrompt(question);
+    const payload = attached ? buildTextPayload(question) : buildFullPrompt(question);
     let deliveryPlan = null;
     let stagedAttachmentName = null;
 
@@ -1901,11 +2091,14 @@ async function sendQuestion(page, question, targetUrl = URL, context = null) {
 
     const finalInput = promptInput(page);
     const composerText = stagedAttachmentName
-        ? `${question.text}\n\n(The complete document context was attached as "${stagedAttachmentName}".)`.trim()
+        ? `${buildTextPayload(question)}\n\n(The complete document context was attached as "${stagedAttachmentName}").`.trim()
         : payload;
     const expectedParts = [];
     if (question.text) expectedParts.push(question.text.trim().slice(0, 60));
     if (!attached && question.files.length > 0) expectedParts.push("</file>");
+    if (question.commandResults && question.commandResults.length > 0) {
+        expectedParts.push('<command name="');
+    }
 
     console.log(">> Writing prompt...");
     let verified = false;
@@ -2540,9 +2733,10 @@ async function launchBrowser() {
     throw new Error(`No browser could be launched (tried: ${browsersToTry.map((b) => b.name).join(", ")}). ${lastError?.message || ""}`);
 }
 
-function loadQuestion() {
+async function loadQuestion() {
     const question = parseQuestion();
     question.files = loadFiles(question.files);
+    question.commandResults = await executeCommands(CLI.commands);
     return question;
 }
 
@@ -2595,7 +2789,7 @@ async function main() {
     if (loginOnly) {
         console.log(">> Login mode: launching browser for manual login...");
     }
-    const question = loginOnly ? null : loadQuestion();
+    const question = loginOnly ? null : await loadQuestion();
     if (question && continuing) {
         question.originalText = question.text;
         question.text = buildContinuationPrompt(continuing.messages || [], question.text);

@@ -33,6 +33,17 @@ BASIC COMMANDS
   askweb --find-error src/index.js a.js b.js
     Run a preset over multiple files.
 
+COMMANDS
+  --cmd <command>    Execute a local shell command and include its output in the prompt.
+    Can be repeated for multiple commands.
+      askweb --cmd "git status" "Explain the current repository state."
+      askweb --cmd "git diff" --cmd "git status" "Review my changes."
+      askweb --cmd "git log -5" "Summarize the recent changes."
+
+  Commands execute locally with your user's permissions. A 30s timeout applies
+  per command. Output is capped at 100 KB per stream (set ASKWEB_MAX_CMD_OUTPUT
+  to override). Obvious destructive patterns are blocked.
+
 OPTIONS
 {{OPTION_DEFINITIONS}}
 
@@ -224,6 +235,13 @@ ENVIRONMENT
       payload exceeds the single-message budget.
       Example (Windows): $env:ASKWEB_CHUNK_SIZE=40000; node index.js "long q"
       Example (Unix):    ASKWEB_CHUNK_SIZE=40000 node index.js "long q"
+
+  ASKWEB_MAX_CMD_OUTPUT=<characters>
+      Maximum characters to capture per command output stream (stdout or stderr)
+      when using --cmd. Output beyond this is truncated with an explicit marker
+      in the prompt. Default: 100000 (100 KB).
+      Example (Windows): $env:ASKWEB_MAX_CMD_OUTPUT=20000; node index.js --cmd "git log"
+      Example (Unix):    ASKWEB_MAX_CMD_OUTPUT=20000 node index.js --cmd "git log"
 
 NOTES
   - Browser profiles and conversation history live in the install directory,
