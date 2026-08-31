@@ -44,6 +44,15 @@ COMMANDS
   per command. Output is capped at 100 KB per stream (set ASKWEB_MAX_CMD_OUTPUT
   to override). Obvious destructive patterns are blocked.
 
+  --dry-run       Build the prompt payload exactly as it would be sent to
+                   ChatGPT (question, inlined files, command results, and any
+                   <file> blocks) and print it to stdout without launching a
+                   browser or sending anything. Useful for previewing how files
+                   and --cmd outputs are assembled before a real run:
+                     askweb --dry-run "Review this" src/index.js
+                   --dry-run cannot be combined with standalone actions like
+                   --login, --logout, --browser, --prompts, or --clear-*.
+
 OPTIONS
 {{OPTION_DEFINITIONS}}
 
@@ -139,6 +148,12 @@ CONVERSATIONS
   context carries over. It works even when logged out. After each answer the
   updated conversation is saved; the id is printed so you can pass it to
   --continue <id> later.
+
+  Manage history locally:
+    --clear-conversations   Delete all saved conversations.
+    --clear-conversation <id>  Delete one conversation (full id or unique prefix).
+  These edit .chatgpt-conversations.json in the install directory and take no
+  browser input.
 
 OUTPUT
   -o, --output <file>   Write the answer to <file> (default: {{DEFAULT_OUTPUT_FILE}}).
@@ -252,3 +267,5 @@ NOTES
   - --append and --prepend are mutually exclusive.
   - --continue and --new are mutually exclusive.
   - askweb --help (-h) shows this help; askweb --version (-v) shows the version.
+  - askweb handles SIGINT (Ctrl+C) and SIGTERM by closing the browser and any
+    staged temp payloads cleanly, then exiting.
