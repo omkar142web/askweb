@@ -1438,7 +1438,11 @@ async function attachViaFileInput(page, files) {
     let totalSetInputMs = 0;
     let totalChipMs = 0;
     let lastError;
-    for (let i = count - 1; i >= 0; i--) {
+    // Try from index 0 upward. ChatGPT's live upload input is consistently
+    // the first input[type=file] in the DOM; dead inputs (hidden/legacy)
+    // are appended later. Starting at 0 hits the working input on the first
+    // try, skipping the ~1.5s probe cycle on every dead input.
+    for (let i = 0; i < count; i++) {
         try {
             const setInputStart = Date.now();
             await inputs.nth(i).setInputFiles(files.map((f) => f.fullPath), { timeout: 5000 });
