@@ -53,7 +53,7 @@ const PROMPT_NAME_RE = /^[-a-z0-9_]+$/i;
 const RESERVED_PROMPT_FLAGS = new Set([
     "o", "output", "login", "continue", "new", "browser", "browser-order", "browser-reset",
     "clear-session", "clear-conversations", "clear-conversation", "help", "h", "version", "v",
-    "prompts", "prompt-create", "append", "prepend", "logout",
+    "prompts", "prompt-create", "append", "prepend", "logout", "dry-run",
 ]);
 
 const BUILTIN_PROMPTS = {
@@ -509,6 +509,12 @@ const OPTION_DEFINITIONS = [
         desc: "Show the version and exit.",
         example: "askweb --version",
     },
+    {
+        flags: ["--dry-run"],
+        desc: "Print the exact prompt payload that would be sent to ChatGPT, then exit. No browser is launched and nothing is sent.",
+        note: "Cannot be combined with --login. Cannot be combined with --logout.",
+        example: 'askweb --dry-run "Explain closures"',
+    },
 ];
 
 function renderOption(def) {
@@ -571,6 +577,7 @@ function parseCliArgs(argv = process.argv.slice(2)) {
     const options = {
         login: false,
         logout: false,
+        dryRun: false,
         clearSession: false,
         clearConversations: false,
         clearConversationId: null,
@@ -662,6 +669,11 @@ function parseCliArgs(argv = process.argv.slice(2)) {
 
         if (arg === "--browser-reset") {
             options.resetBrowserPrefs = true;
+            continue;
+        }
+
+        if (arg === "--dry-run") {
+            options.dryRun = true;
             continue;
         }
 
@@ -2538,6 +2550,11 @@ async function main() {
     if (CLI.showHelp) return showHelp();
     if (CLI.showVersion) return console.log(`v${VERSION}`);
 
+    if (CLI.dryRun && (CLI.login || CLI.logout || CLI.configureBrowser || CLI.configureBrowserOrder || CLI.resetBrowserPrefs || CLI.promptsAction === "manager" || CLI.promptCreate !== null || CLI.clearConversations || CLI.clearConversationId)) {
+        console.log(">> --dry-run can only be combined with a question (optionally with files or a preset). It cannot be combined with standalone actions like --login, --logout, --browser, --prompts, --prompt-create, --clear-conversations, or --clear-conversation. Exiting without performing any action.");
+        return;
+    }
+
     if (CLI.promptCreate !== null) return createPromptFlow(CLI.promptCreate);
     if (CLI.promptsAction === "manager") return runPromptManager();
 
@@ -2582,6 +2599,19 @@ async function main() {
     if (question && continuing) {
         question.originalText = question.text;
         question.text = buildContinuationPrompt(continuing.messages || [], question.text);
+    }
+
+    if (CLI.dryRun) {
+        if (loginOnly) {
+            console.log(">> --dry-run cannot inspect a payload when --login is used (no question is sent). Exiting without launching a browser.");
+            return;
+        }
+        const payload = buildFullPrompt(question);
+        process.stdout.write("\n--- DRY RUN: PROMPT THAT WOULD BE SENT TO CHATGPT ---\n");
+        process.stdout.write(payload);
+        process.stdout.write("\n--- END DRY RUN ---\n");
+        console.log(`>> Payload length: ${payload.length} characters`);
+        return;
     }
 
     const context = await launchBrowser();
