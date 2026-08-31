@@ -828,7 +828,9 @@ function parseCliArgs(argv = process.argv.slice(2)) {
 
         if (arg === "--clear-conversation") {
             const value = argv[i + 1];
-            if (!value) throw new Error(`${arg} requires a conversation id`);
+            if (!value || value.startsWith("-")) {
+                throw new Error(`${arg} requires a conversation id (use ${arg}=<id> to pass a value starting with "-")`);
+            }
             options.clearConversationId = stripShellQuotes(value);
             i++;
             continue;
@@ -899,7 +901,9 @@ function parseCliArgs(argv = process.argv.slice(2)) {
 
         if (arg === "--output" || arg === "-o") {
             const value = argv[i + 1];
-            if (!value) throw new Error(`${arg} requires a file path`);
+            if (!value || value.startsWith("-")) {
+                throw new Error(`${arg} requires a file path (use ${arg}=<path> to pass a value starting with "-")`);
+            }
             options.outputFile = stripShellQuotes(value);
             i++;
             continue;
