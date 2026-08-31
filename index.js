@@ -2499,7 +2499,7 @@ function findConversationById(idPrefix) {
         for (const conversation of matches) {
             console.log(`   ${conversation.id}  "${conversation.title || "(untitled)"}" (${conversation.messages.length} messages)`);
         }
-        console.log(`>> Using the first match. Use a longer prefix to be specific.`);
+        throw new Error(`Conversation id prefix "${idPrefix}" is ambiguous. Use a longer prefix to be specific.`);
     }
 
     return matches[0];
