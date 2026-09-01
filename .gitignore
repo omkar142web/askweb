@@ -5,6 +5,7 @@ user-data-chrome/
 user-data-edge/
 .env
 .browser-prefs.json
+.ai-prefs.json
 .chatgpt-conversations.json
 output.md
 answer.md

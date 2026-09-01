@@ -118,7 +118,7 @@ function isUsableControl(el) {
 }
 
 const PAGE_DOM_SOURCE = {
-    firstVisibleElement: `(function(){${domIsVisible.toString()};return ${firstVisibleElement.toString()}})()`,
+    firstVisibleElement: `(function(){const domIsVisible=${domIsVisible.toString()};return ${firstVisibleElement.toString()}})()`,
     domIsVisible: `(${domIsVisible.toString()})`,
     elementText: `(${elementText.toString()})`,
     isUsableControl: `(${isUsableControl.toString()})`,

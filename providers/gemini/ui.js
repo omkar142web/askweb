@@ -8,7 +8,10 @@ const COMPOSER_SELECTORS = [
     'div[contenteditable="true"][role="textbox"]',
     'div[contenteditable="true"]',
     'textarea',
-    '[aria-label*="prompt" i]',
+    // Fallback: only match actual writable controls with "prompt" in aria-label.
+    // Never match <a> links or other non-writable elements (e.g. nav items
+    // like "HTML Template Improvement Prompts").
+    'input[aria-label*="prompt" i], textarea[aria-label*="prompt" i], [contenteditable="true"][aria-label*="prompt" i]',
 ];
 
 const SEND_BUTTON_SELECTORS = [
@@ -100,17 +103,24 @@ const elementText = (el) => {
 };
 
 const isUsableControl = (el) => {
-    return (
+    if (
         !!el &&
         !el.disabled &&
         !el.readOnly &&
         el.getAttribute("aria-disabled") !== "true" &&
         el.getAttribute("aria-hidden") !== "true"
-    );
+    ) {
+        // Only accept elements that can actually receive text input
+        // (input, textarea, or contentEditable). Rejects <a>, <button>,
+        // <div>, etc. that happen to match a broad selector.
+        const tag = el.tagName.toLowerCase();
+        return tag === "input" || tag === "textarea" || el.isContentEditable;
+    }
+    return false;
 };
 
 const PAGE_DOM_SOURCE = {
-    firstVisibleElement: `(function(){${domIsVisible.toString()};return ${firstVisibleElement.toString()}})()`,
+    firstVisibleElement: `(function(){const domIsVisible=${domIsVisible.toString()};return ${firstVisibleElement.toString()}})()`,
     domIsVisible: `(${domIsVisible.toString()})`,
     elementText: `(${elementText.toString()})`,
     isUsableControl: `(${isUsableControl.toString()})`,
@@ -196,7 +206,20 @@ async function isPromptReady(page) {
     const count = await input.count().catch(() => 0);
     if (count === 0) return false;
     const modal = await modalVisible(page);
-    return !modal;
+    if (modal) return false;
+    // Verify the matched element is a writable input control
+    // (not just any visible element matching the selector, e.g. <a> links)
+    const writable = await page
+        .evaluate(
+            ({ selector, finderSource, usableSource }) => {
+                const el = eval(finderSource)(selector);
+                if (!el) return false;
+                return eval(usableSource)(el);
+            },
+            geminiDom.promptPayload()
+        )
+        .catch(() => false);
+    return writable;
 }
 
 async function waitForEnabled(page, input) {
