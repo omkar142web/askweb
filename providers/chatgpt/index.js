@@ -12,11 +12,6 @@ const AUTH_COOKIE_PREFIXES = [
 
 const TITLE_SUFFIX_RE = /-\s*ChatGPT\s*$/i;
 
-function isOnAuthPage(page) {
-    const url = page.url();
-    return url.includes("/auth/login") || url.includes("/auth/signin");
-}
-
 function createChatGptProvider(deps) {
     const {
         gotoChatGPT,
@@ -88,7 +83,6 @@ function createChatGptProvider(deps) {
         waitUntilReady: waitForChatGPTReady,
         startPopupMonitor: deps.startPopupMonitor,
         isLoggedIn: isLoggedInViaCookies,
-        isOnAuthPage,
         runLoginFlow: (page, context) => runLoginFlow(page, context),
         runLogoutFlow: (page, context) => runLogoutFlow(page, context),
 
