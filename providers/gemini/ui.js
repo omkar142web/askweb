@@ -520,12 +520,13 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
 
     console.log(">> Answer received, waiting for generation to stabilize...");
     const STABLE_POLLS_REQUIRED = 3;
-    const POLL_MS = 1000;
+    const POLL_MS = 500;
+    const stabStart = Date.now();
     let stableCount = 0;
     let textStableCount = 0;
-    let prevLength = -1;
     const answer = replies.last();
     await answer.waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
+    let prevLength = (await answer.innerText().catch(() => "")).trim().length;
 
     const STABILIZATION_DEADLINE = Date.now() + 60 * 1000;
     let totalPolls = 0;
@@ -566,7 +567,7 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
         }
     }
 
-    console.log(`>> Generation stable (${totalPolls} polls, final length: ${prevLength} chars).`);
+    console.log(`>> Generation stable (${totalPolls} polls, final length: ${prevLength} chars, took ${Date.now() - stabStart}ms).`);
     return await answer.innerText().catch(() => "");
 }
 

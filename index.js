@@ -19,7 +19,7 @@ const BROWSERS = [
     { name: "brave", executablePath: `${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`, profileDir: path.join(APP_DIR, "user-data-brave") },
     { name: "edge", channel: "msedge", profileDir: path.join(APP_DIR, "user-data-edge") },
 ];
-const POLL_MS = 1000;
+const POLL_MS = 500;
 const STABLE_POLLS_REQUIRED = 3;
 const MAX_FILE_CHARS = 400000;
 const SINGLE_PASTE_MAX = 25000;
@@ -2336,11 +2336,12 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
     }
 
     console.log(">> Answer received, waiting for generation to stabilize...");
+    const stabStart = Date.now();
     let stableCount = 0;
     let textStableCount = 0;
-    let prevLength = -1;
     const answer = replies.last();
     await answer.waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
+    let prevLength = (await answer.innerText().catch(() => "")).trim().length;
 
     const STABILIZATION_DEADLINE = Date.now() + 60 * 1000;
     let totalPolls = 0;
@@ -2381,7 +2382,7 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
         }
     }
 
-    console.log(`>> Generation stable (${totalPolls} polls, final length: ${prevLength} chars).`);
+    console.log(`>> Generation stable (${totalPolls} polls, final length: ${prevLength} chars, took ${Date.now() - stabStart}ms).`);
     markPhase("generate");
     let markdown = await extractAnswerMarkdown(page, answer);
     if (markdown) {
