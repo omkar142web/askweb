@@ -497,13 +497,7 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
         const grew = count > assistantCountBefore;
         const newText = count > 0 ? (await replies.last().innerText().catch(() => "")).trim() : "";
 
-        // Require that a detected reply has genuinely fresh content — not an
-        // empty placeholder and not a stale re-render of the previous last
-        // message's text.  This prevents waitForAnswer from treating an
-        // already-existing response as the newly generated one.
-        const contentFresh = newText && (!previousLastText || newText !== previousLastText);
-
-        if ((grew && contentFresh) || ((sawGeneration || (await composerEmpty(page))) && !stopVisible && contentFresh)) {
+        if (grew || ((sawGeneration || (await composerEmpty(page))) && !stopVisible && newText && newText !== previousLastText)) {
             ready = true;
             const elapsed = ((Date.now() - (deadline - 3 * 60 * 1000)) / 1000).toFixed(1);
             console.log(`>> Answer appeared after ${elapsed}s (replies: ${count}, text length: ${newText.length}).`);
@@ -525,28 +519,50 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
     }
 
     console.log(">> Answer received, waiting for generation to stabilize...");
+    const STABLE_POLLS_REQUIRED = 3;
+    const POLL_MS = 1000;
     let stableCount = 0;
+    let textStableCount = 0;
     let prevLength = -1;
     const answer = replies.last();
     await answer.waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
 
+    const STABILIZATION_DEADLINE = Date.now() + 60 * 1000;
     let totalPolls = 0;
-    const STABLE_POLLS_REQUIRED = 3;
-    const POLL_MS = 1000;
     while (stableCount < STABLE_POLLS_REQUIRED) {
         await page.waitForTimeout(POLL_MS);
         totalPolls += 1;
 
         const stopVisible = await isStopVisible(page);
+
         const text = await answer.innerText().catch(() => "");
         const lastLength = text.trim().length;
 
-        const unchanged = lastLength === prevLength && lastLength > 0 && !stopVisible;
+        const textStable = lastLength === prevLength && lastLength > 0;
+        // Full stability requires text stability AND the stop button having
+        // disappeared, which indicates generation has fully ended.
+        const unchanged = textStable && !stopVisible;
         stableCount = unchanged ? stableCount + 1 : 0;
+        textStableCount = textStable ? textStableCount + 1 : 0;
         prevLength = lastLength;
 
         if (!unchanged && totalPolls > 0 && totalPolls % 5 === 0) {
             console.log(`>> Still generating... (poll ${totalPolls}, current length: ${lastLength} chars, stop visible: ${stopVisible}).`);
+        }
+
+        // If the text has been stable for 3+ consecutive polls but the stop
+        // button is still visible, the generation has likely completed but
+        // the UI hasn't hidden the stop button yet. Proceed using text-only
+        // stability as the signal.
+        if (textStableCount >= STABLE_POLLS_REQUIRED && stopVisible) {
+            console.log(`>> Text stable for ${textStableCount} polls; stop button still visible, treating generation as complete.`);
+            break;
+        }
+
+        // Hard deadline backstop: never hang indefinitely.
+        if (Date.now() >= STABILIZATION_DEADLINE) {
+            console.log(`>> Stabilization deadline reached after ${totalPolls} polls; proceeding with current text (${lastLength} chars).`);
+            break;
         }
     }
 

@@ -1209,12 +1209,12 @@ async function trySend(page, sendButton, { requireVisible = false, force = false
 async function waitForSendAccepted(page, countBefore, timeoutMs) {
     return page
         .waitForFunction(
-            ({ userSelector, stopSelector, promptSelector, finderSource, textSource, usableSource, before }) => {
+            ({ userSelector, stopSelector, promptSelector, firstVisibleElement, elementText, isUsableControl, before }) => {
                 if (document.querySelectorAll(userSelector).length > before) return true;
                 const stopButton = document.querySelector(stopSelector);
-                if (eval(usableSource)(stopButton)) return true;
-                const input = eval(finderSource)(promptSelector);
-                const text = eval(textSource)(input);
+                if (eval(isUsableControl)(stopButton)) return true;
+                const input = eval(firstVisibleElement)(promptSelector);
+                const text = eval(elementText)(input);
                 return text.trim().length === 0;
             },
             {
@@ -1241,6 +1241,16 @@ async function pressSendAndConfirm(page, timeoutMs = 8000) {
     if (!sentDetected) {
         console.log(">> Send may have failed, retrying...");
         await dismissAndSettle(page);
+        // Before re-clicking, check whether the first click silently succeeded.
+        // The send may have been accepted but the DOM signals (user-message
+        // count, stop button, composer empty) can take a moment to register
+        // — a delayed detection should still be treated as success, avoiding
+        // a duplicate prompt submission.
+        const alreadyAccepted = await waitForSendAccepted(page, countBefore, 3000);
+        if (alreadyAccepted) {
+            console.log(">> Send confirmed (initial click succeeded, detection was delayed).");
+            return true;
+        }
         const retryInput = promptInput(page);
         if ((await retryInput.count()) > 0) {
             await focusComposer(retryInput);
@@ -2327,10 +2337,12 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
 
     console.log(">> Answer received, waiting for generation to stabilize...");
     let stableCount = 0;
+    let textStableCount = 0;
     let prevLength = -1;
     const answer = replies.last();
     await answer.waitFor({ state: "visible", timeout: 60000 }).catch(() => {});
 
+    const STABILIZATION_DEADLINE = Date.now() + 60 * 1000;
     let totalPolls = 0;
     while (stableCount < STABLE_POLLS_REQUIRED) {
         await page.waitForTimeout(POLL_MS);
@@ -2341,12 +2353,31 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
         const text = await answer.innerText().catch(() => "");
         const lastLength = text.trim().length;
 
-        const unchanged = lastLength === prevLength && lastLength > 0 && !stopVisible;
+        const textStable = lastLength === prevLength && lastLength > 0;
+        // Full stability requires text stability AND the stop button having
+        // disappeared, which indicates ChatGPT finished generating.
+        const unchanged = textStable && !stopVisible;
         stableCount = unchanged ? stableCount + 1 : 0;
+        textStableCount = textStable ? textStableCount + 1 : 0;
         prevLength = lastLength;
 
         if (!unchanged && totalPolls > 0 && totalPolls % 5 === 0) {
             console.log(`>> Still generating... (poll ${totalPolls}, current length: ${lastLength} chars, stop visible: ${stopVisible}).`);
+        }
+
+        // If the text has been stable for 3+ consecutive polls but the stop
+        // button is still visible, the generation has likely completed but
+        // the UI hasn't hidden the stop button yet. Proceed using text-only
+        // stability as the signal.
+        if (textStableCount >= STABLE_POLLS_REQUIRED && stopVisible) {
+            console.log(`>> Text stable for ${textStableCount} polls; stop button still visible, treating generation as complete.`);
+            break;
+        }
+
+        // Hard deadline backstop: never hang indefinitely.
+        if (Date.now() >= STABILIZATION_DEADLINE) {
+            console.log(`>> Stabilization deadline reached after ${totalPolls} polls; proceeding with current text (${lastLength} chars).`);
+            break;
         }
     }
 

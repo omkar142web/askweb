@@ -25,6 +25,17 @@ async function withLogCapture(promise) {
     }
 }
 
+// Race a promise against a timeout. Rejects with a labelled error if the
+// timeout fires first, so a regression (infinite loop) fails the test fast
+// instead of hanging the whole suite.
+function withTimeout(promise, ms, label) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 // --- DOM fixtures ---
 
 function baseDOM(options = {}) {
@@ -150,32 +161,26 @@ function baseDOM(options = {}) {
     check("pressSendAndConfirm (delayed): NO second send click", clickCount6 === 1);
 
     // =====================================================================
-    // Test 7: waitForAnswer does NOT treat a stale same-text response as new.
-    // An existing message with text "Old response text" is present; count (1)
-    // is greater than assistantCountBefore (0) but contentFresh is false
-    // because newText === previousLastText.  Only a genuinely new message
-    // (with different text) should be detected.
+    // Test 7: waitForAnswer detects a response that appeared during a
+    // send-confirmation delay (simulates the pre-retry path).  The response
+    // is already present when waitForAnswer starts; grew=true must still
+    // detect it — the contentFresh guard was reverted because it caused
+    // waitForAnswer to get stuck when the response pre-existed.
     // =====================================================================
     await page.setContent(`
         <div id="app">
-            <model-response><div class="response-content">Old response text</div></model-response>
+            <model-response><div class="response-content">Already-present response</div></model-response>
             <textarea id="composer" aria-label="Enter a prompt for Gemini" style="display:block"></textarea>
             <button aria-label="Stop" style="display:none">Stop</button>
         </div>
     `);
 
-    const answerPromise = ui.waitForAnswer(page, 0);
-    await page.waitForTimeout(500);
-    await page.evaluate(() => {
-        const el = document.createElement("model-response");
-        el.innerHTML = '<div class="response-content">Brand new response</div>';
-        document.getElementById("app").appendChild(el);
-    });
-    const answer7 = await answerPromise;
-    check("waitForAnswer: detects genuinely new response after stale present", answer7.includes("Brand new response"));
+    const answer7 = await ui.waitForAnswer(page, 0);
+    check("waitForAnswer: detects pre-existing response when count grew from 0", answer7.includes("Already-present response"));
 
     // =====================================================================
-    // Test 8: waitForAnswer detects new response when count grows
+    // Test 8: waitForAnswer detects genuinely new response (count grew
+    // from 1 to 2, text differs from previousLastText)
     // =====================================================================
     await page.setContent(`
         <div id="app">
@@ -193,6 +198,27 @@ function baseDOM(options = {}) {
     });
     const answer8 = await answerPromise2;
     check("waitForAnswer: detects new response when count grew", answer8.includes("This is the new answer"));
+
+    // =====================================================================
+    // Test 9: waitForAnswer stabilization handles a lingering stop button.
+    // When the answer text is stable but the stop button is still visible
+    // (Gemini/ChatGPT sometimes keeps it visible briefly after generation
+    // completes), waitForAnswer must still exit within a few polls instead
+    // of hanging forever.
+    // =====================================================================
+    await page.setContent(`
+        <div id="app">
+            <model-response><div class="response-content">Complete and stable answer</div></model-response>
+            <textarea id="composer" aria-label="Enter a prompt for Gemini" style="display:block"></textarea>
+            <button aria-label="Stop" style="display:block">Stop</button>
+        </div>
+    `);
+
+    // Wrap in a timeout so the test fails fast instead of hanging the suite
+    // if a regression reintroduces the infinite loop.
+    const answer9Promise = withTimeout(ui.waitForAnswer(page, 0), 15000, "lingering-stop-button");
+    const answer9 = await answer9Promise.catch(() => null);
+    check("waitForAnswer: proceeds with stable text despite lingering stop button", !!answer9 && answer9.includes("Complete and stable answer"));
 
     await browser.close();
 
