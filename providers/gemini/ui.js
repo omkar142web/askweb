@@ -354,22 +354,29 @@ async function trySend(page, sendBtn) {
     }
 }
 
-async function pressSendAndConfirm(page, timeoutMs = 8000) {
-    const button = sendButton(page);
-    const countBefore = await userMessages(page).count().catch(() => 0);
-    console.log(">> Clicking send button...");
-    await trySend(page, button);
-    await page.waitForTimeout(1000);
-
-    const sentDetected = await page
+async function waitForSendAccepted(page, countBefore, timeoutMs) {
+    return page
         .waitForFunction(
-            ({ userSel, finderSource, textSource, before }) => {
+            ({ userSel, stopSel, promptSel, finderSource, textSource, before }) => {
+                // Signal 1: a new user message appeared in the conversation.
                 const msgs = document.querySelectorAll(userSel);
                 if (msgs.length > before) return true;
+                // Signal 2: the stop button became visible (Gemini shows a stop
+                // button as soon as generation starts, replacing the send button).
+                if (eval(finderSource)(stopSel)) return true;
+                // Signal 3: the composer was cleared (the prompt text was
+                // consumed by the send action).
+                const input = eval(finderSource)(promptSel);
+                if (input) {
+                    const text = eval(textSource)(input);
+                    if (text.trim().length === 0) return true;
+                }
                 return false;
             },
             {
-                userSelector: selector("userMessage"),
+                userSel: selector("userMessage"),
+                stopSel: selector("stopButton"),
+                promptSel: selector("promptInput"),
                 finderSource: PAGE_DOM_SOURCE.firstVisibleElement,
                 textSource: PAGE_DOM_SOURCE.elementText,
                 before: countBefore,
@@ -378,22 +385,35 @@ async function pressSendAndConfirm(page, timeoutMs = 8000) {
         )
         .then(() => true)
         .catch(() => false);
+}
+
+async function pressSendAndConfirm(page, timeoutMs = 8000) {
+    const button = sendButton(page);
+    const countBefore = await userMessages(page).count().catch(() => 0);
+    console.log(">> Clicking send button...");
+    await trySend(page, button);
+    await page.waitForTimeout(1000);
+
+    const sentDetected = await waitForSendAccepted(page, countBefore, timeoutMs);
 
     if (!sentDetected) {
         console.log(">> Send may have failed, retrying...");
         await dismissAndSettle(page);
+        // Before re-clicking, check whether the first click silently succeeded.
+        // Gemini can take a moment to render the user message element after the
+        // send — the stop button appearing or the composer emptying are more
+        // immediate and reliable signals than the user-message count.
+        const alreadyAccepted = await waitForSendAccepted(page, countBefore, 3000);
+        if (alreadyAccepted) {
+            console.log(">> Send confirmed (initial click succeeded, detection was delayed).");
+            return true;
+        }
         await trySend(page, button);
         await page.waitForTimeout(1000);
-        await page
-            .waitForFunction(
-                ({ userSel, before }) => document.querySelectorAll(userSel).length > before,
-                { userSelector: selector("userMessage"), before: countBefore },
-                { timeout: timeoutMs }
-            )
-            .then(() => true)
-            .catch(() => false);
-        console.log(">> Send confirmed on retry.");
-        return sentDetected;
+        const retryResult = await waitForSendAccepted(page, countBefore, timeoutMs);
+        if (retryResult) console.log(">> Send confirmed on retry.");
+        else console.log(">> Send not confirmed after retry.");
+        return retryResult;
     }
     console.log(">> Send confirmed.");
     return sentDetected;
@@ -477,7 +497,13 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
         const grew = count > assistantCountBefore;
         const newText = count > 0 ? (await replies.last().innerText().catch(() => "")).trim() : "";
 
-        if (grew || ((sawGeneration || (await composerEmpty(page))) && !stopVisible && newText && newText !== previousLastText)) {
+        // Require that a detected reply has genuinely fresh content — not an
+        // empty placeholder and not a stale re-render of the previous last
+        // message's text.  This prevents waitForAnswer from treating an
+        // already-existing response as the newly generated one.
+        const contentFresh = newText && (!previousLastText || newText !== previousLastText);
+
+        if ((grew && contentFresh) || ((sawGeneration || (await composerEmpty(page))) && !stopVisible && contentFresh)) {
             ready = true;
             const elapsed = ((Date.now() - (deadline - 3 * 60 * 1000)) / 1000).toFixed(1);
             console.log(`>> Answer appeared after ${elapsed}s (replies: ${count}, text length: ${newText.length}).`);
@@ -557,6 +583,7 @@ module.exports = {
     typePrompt,
     sendButtonUsable,
     trySend,
+    waitForSendAccepted,
     pressSendAndConfirm,
     isStopVisible,
     waitForGenerationEnd,
