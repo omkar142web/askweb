@@ -3038,16 +3038,13 @@ async function main() {
 
         const savedProvider = continuing.provider || "chatgpt";
         if (CLI.provider && CLI.provider !== savedProvider) {
-            console.log(`>> Warning: --provider ${CLI.provider} differs from the conversation's provider (${savedProvider}). Using --provider.`);
-        } else if (!CLI.provider && savedProvider) {
-            try {
-                const resolved = getProvider(savedProvider);
-                provider = resolved;
-                targetUrl = provider.url;
-                console.log(`>> Resuming with provider: ${provider.name}`);
-            } catch {
-                console.log(`>> Saved conversation provider "${savedProvider}" is not available, using ${provider.name}.`);
-            }
+            console.log(`>> Warning: --provider ${CLI.provider} differs from the conversation's original provider (${savedProvider}).`);
+            console.log(`>> Using --provider as requested; transcript will be replayed via ${provider.name}.`);
+        } else if (!CLI.provider && savedProvider && savedProvider !== provider.id) {
+            console.log(`>> Note: This conversation was originally started with ${savedProvider}, but continuing with the currently selected provider (${provider.name}).`);
+            console.log(`>> Use --provider ${savedProvider} to continue with the original provider.`);
+        } else {
+            console.log(`>> Resuming with provider: ${provider.name}`);
         }
     }
 
