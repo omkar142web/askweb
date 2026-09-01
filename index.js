@@ -33,6 +33,7 @@ const PREFS_FILE = path.join(__dirname, ".browser-prefs.json");
 const CONVERSATIONS_FILE = path.join(__dirname, ".chatgpt-conversations.json");
 const MAX_SAVED_CONVERSATIONS = 50;
 const CONVERSATION_URL_RE = /\/c\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
+const AI_PREFS_FILE = path.join(__dirname, ".ai-prefs.json");
 const PASTE_FILE_EXTENSIONS = new Set([
     ".css",
     ".csv",
@@ -55,6 +56,7 @@ const RESERVED_PROMPT_FLAGS = new Set([
     "o", "output", "login", "continue", "new", "browser", "browser-order", "browser-reset",
     "clear-session", "clear-conversations", "clear-conversation", "help", "h", "version", "v",
     "prompts", "prompt-create", "append", "prepend", "logout", "dry-run", "cmd",
+    "provider", "ai", "ai-order", "ai-reset",
 ]);
 
 const CMD_TIMEOUT_MS = 30_000;
@@ -346,6 +348,11 @@ const {
     startPopupMonitor,
 } = require("./chatgpt-ui");
 
+const { registerProvider, getProvider, getAllProviders } = require("./providers");
+const { createChatGptProvider } = require("./providers/chatgpt");
+
+let CHATGPT_PROVIDER = null;
+
 const T0 = Date.now();
 const PHASES = [];
 function markPhase(name) {
@@ -634,8 +641,34 @@ const OPTION_DEFINITIONS = [
         example: "askweb --browser-reset",
     },
     {
+        flags: ["--provider"],
+        arg: "<name>",
+        argRequired: true,
+        desc: "Choose AI provider for this run (e.g. chatgpt, gemini). Overrides the default from the --ai menu.",
+        note: "Available providers are listed by `askweb --help`. If omitted, the default from --ai (or ChatGPT) is used.",
+        example: 'askweb --provider gemini "Explain React"',
+    },
+    {
+        flags: ["--ai"],
+        desc: "Open a menu to choose the default AI website (ChatGPT, Gemini).",
+        note: "Standalone action (interactive).",
+        example: "askweb --ai",
+    },
+    {
+        flags: ["--ai-order"],
+        desc: "Open a menu to reorder the AI website fallback list interactively.",
+        note: "Standalone action (interactive).",
+        example: "askweb --ai-order",
+    },
+    {
+        flags: ["--ai-reset"],
+        desc: "Delete saved AI website preferences and return to automatic selection (ChatGPT first).",
+        note: "Standalone action.",
+        example: "askweb --ai-reset",
+    },
+    {
         flags: ["--clear-session"],
-        desc: "Wipe the browser profile's local/session storage before launching, so ChatGPT starts fresh (logged out) for this run.",
+        desc: "Wipe the browser profile's local/session storage before launching, so the AI website starts fresh (logged out) for this run.",
         note: "Modifier: combine with a question or with --login.",
         example: 'askweb --clear-session "What is today\'s date?"',
     },
@@ -666,7 +699,7 @@ const OPTION_DEFINITIONS = [
     {
         flags: ["--dry-run"],
         desc: "Print the exact prompt payload that would be sent to ChatGPT, then exit. No browser is launched and nothing is sent.",
-        note: "Cannot be combined with standalone actions: --login, --logout, --browser, --browser-order, --browser-reset, --prompts, --prompt-create, --clear-conversations, or --clear-conversation.",
+        note: "Cannot be combined with standalone actions: --login, --logout, --browser, --browser-order, --browser-reset, --prompts, --prompt-create, --ai, --ai-order, --ai-reset, --clear-conversations, or --clear-conversation.",
         example: 'askweb --dry-run "Explain closures"',
     },
     {
@@ -746,6 +779,10 @@ function parseCliArgs(argv = process.argv.slice(2)) {
         configureBrowser: false,
         configureBrowserOrder: false,
         resetBrowserPrefs: false,
+        configureAI: false,
+        configureAIOrder: false,
+        resetAIPrefs: false,
+        provider: null,
         continueLast: false,
         continueConversationId: null,
         newConversation: false,
@@ -832,6 +869,38 @@ function parseCliArgs(argv = process.argv.slice(2)) {
 
         if (arg === "--browser-reset") {
             options.resetBrowserPrefs = true;
+            continue;
+        }
+
+        if (arg === "--ai") {
+            options.configureAI = true;
+            continue;
+        }
+
+        if (arg === "--ai-order") {
+            options.configureAIOrder = true;
+            continue;
+        }
+
+        if (arg === "--ai-reset") {
+            options.resetAIPrefs = true;
+            continue;
+        }
+
+        if (arg === "--provider") {
+            const value = argv[i + 1];
+            if (!value || value.startsWith("-")) {
+                throw new Error(`${arg} requires a provider name (use ${arg}=<name> to pass a value starting with "-")`);
+            }
+            options.provider = stripShellQuotes(value);
+            i++;
+            continue;
+        }
+
+        if (arg.startsWith("--provider=")) {
+            const value = arg.slice("--provider=".length);
+            if (!value) throw new Error("--provider requires a provider name");
+            options.provider = stripShellQuotes(value);
             continue;
         }
 
@@ -2523,21 +2592,24 @@ function buildContinuationPrompt(history, newQuestion) {
     ].join("\n");
 }
 
-async function recordConversation(page, run) {
+async function recordConversation(page, run, provider) {
     try {
         console.log(">> Recording conversation to local history...");
-        let match = page.url().match(CONVERSATION_URL_RE);
-        const deadline = Date.now() + 2000;
-        while (!match && Date.now() < deadline) {
-            await page.waitForTimeout(250);
-            match = page.url().match(CONVERSATION_URL_RE);
+        const convId = provider ? await provider.getConversationId(page) : null;
+        const convIdStr = convId;
+
+        let title = null;
+        if (provider && provider.getConversationTitle) {
+            title = await provider.getConversationTitle(page);
+        } else {
+            title = (await page.title().catch(() => "")).replace(/\s*-\s*ChatGPT\s*$/i, "").trim();
         }
 
-        const title = (await page.title().catch(() => "")).replace(/\s*-\s*ChatGPT\s*$/i, "").trim();
         const seedMessages = Array.isArray(run.seedMessages) ? run.seedMessages : [];
         const entry = {
-            id: match ? match[1] : crypto.randomUUID(),
-            url: match ? `${URL}c/${match[1]}` : null,
+            id: convIdStr || crypto.randomUUID(),
+            provider: provider ? provider.id : "chatgpt",
+            url: convIdStr ? `${provider ? provider.url : URL}c/${convIdStr}` : null,
             title: title || run.questionText.slice(0, 60),
             updatedAt: new Date().toISOString(),
             ...(run.meta ? { delivery: run.meta } : {}),
@@ -2692,6 +2764,128 @@ function resetBrowserPreferences() {
     console.log("✓ Browser preferences reset to automatic (Chrome first).");
 }
 
+function loadAIPrefs() {
+    try {
+        const prefs = JSON.parse(fs.readFileSync(AI_PREFS_FILE, "utf8"));
+        console.log(`>> Loaded AI preferences (default: ${prefs.defaultAI || "auto"}).`);
+        return prefs;
+    } catch {
+        console.log(">> No AI preferences file found, using defaults.");
+        return {};
+    }
+}
+
+function saveAIPrefs(prefs) {
+    fs.writeFileSync(AI_PREFS_FILE, JSON.stringify(prefs, null, 2), "utf8");
+    console.log(`>> AI preferences saved to ${AI_PREFS_FILE}.`);
+}
+
+function aiLabel(provider) {
+    if (!provider) return "";
+    return provider.name || provider.id;
+}
+
+function aiByName(name) {
+    try {
+        return getProvider(name);
+    } catch {
+        return undefined;
+    }
+}
+
+function orderedAIProviders() {
+    const prefs = loadAIPrefs();
+    const savedOrder = Array.isArray(prefs.aiOrder)
+        ? prefs.aiOrder.map(aiByName).filter(Boolean)
+        : [];
+    const seen = new Set(savedOrder.map((provider) => provider.id));
+    const list = [...savedOrder, ...getAllProviders().filter((provider) => !seen.has(provider.id))];
+
+    const preferred = prefs.defaultAI ? aiByName(prefs.defaultAI) : null;
+    if (preferred) {
+        const ordered = [preferred, ...list.filter((provider) => provider !== preferred)];
+        console.log(`>> AI provider order resolved: ${ordered.map((p) => aiLabel(p)).join(", ")} (preferred: ${aiLabel(preferred)}).`);
+        return ordered;
+    }
+    console.log(`>> AI provider order resolved: ${list.map((p) => aiLabel(p)).join(", ")}.`);
+    return list;
+}
+
+async function configureDefaultAI() {
+    const prefs = loadAIPrefs();
+    const current = orderedAIProviders();
+
+    console.log("\nAI website configuration\n");
+    console.log(
+        `Current default: ${
+            prefs.defaultAI && aiByName(prefs.defaultAI)
+                ? aiLabel(aiByName(prefs.defaultAI))
+                : `${aiLabel(current[0])} (automatic)`
+        }\n`
+    );
+    getAllProviders().forEach((provider, index) => {
+        console.log(`${index + 1}. ${aiLabel(provider)}`);
+    });
+
+    const answer = await promptUser("\nEnter number to change default (Enter keeps current): ");
+    if (!answer) {
+        console.log(">> Default unchanged.");
+        return;
+    }
+
+    if (!/^\d+$/.test(answer) || Number(answer) < 1 || Number(answer) > getAllProviders().length) {
+        console.log(">> Invalid selection, default unchanged.");
+        return;
+    }
+
+    const chosen = getAllProviders()[Number(answer) - 1];
+    prefs.defaultAI = chosen.id;
+    saveAIPrefs(prefs);
+    console.log(`\n✓ Default AI website changed to ${aiLabel(chosen)}.`);
+}
+
+async function configureAIOrder() {
+    const prefs = loadAIPrefs();
+    const current = orderedAIProviders();
+
+    console.log("\nCurrent order:");
+    current.forEach((provider, index) => {
+        console.log(`${index + 1}. ${aiLabel(provider)}`);
+    });
+
+    const answer = await promptUser("\nEnter new order (e.g. 2,1): ");
+    const indices = answer
+        .split(",")
+        .map((part) => Number(part.trim()))
+        .filter((n) => Number.isInteger(n));
+
+    const isValid =
+        indices.length === getAllProviders().length &&
+        new Set(indices).size === getAllProviders().length &&
+        indices.every((n) => n >= 1 && n <= getAllProviders().length);
+
+    if (!isValid) {
+        console.log(`>> Invalid order (need a permutation of 1-${getAllProviders().length}), unchanged.`);
+        return;
+    }
+
+    prefs.aiOrder = indices.map((n) => current[n - 1].id);
+    saveAIPrefs(prefs);
+    console.log(
+        `\n✓ AI website order updated: ${prefs.aiOrder.map((id) => aiLabel(aiByName(id))).join(", ")}.`
+    );
+}
+
+function resetAIPreferences() {
+    try {
+        fs.unlinkSync(AI_PREFS_FILE);
+        console.log(`>> Deleted AI preferences file: ${AI_PREFS_FILE}`);
+    } catch {
+        console.log(`>> No AI preferences file to delete (${AI_PREFS_FILE}).`);
+    }
+    console.log("✓ AI preferences reset to automatic (ChatGPT first).");
+}
+
 async function launchBrowser() {
     const browsersToTry = orderedBrowsers();
     let lastError;
@@ -2740,12 +2934,53 @@ async function loadQuestion() {
     return question;
 }
 
+CHATGPT_PROVIDER = createChatGptProvider({
+    gotoChatGPT,
+    waitForChatGPTReady,
+    isLoggedInViaCookies,
+    isOnAuthPage,
+    runLoginFlow,
+    runLogoutFlow,
+    promptInput,
+    sendButton,
+    stopButton,
+    attachButton,
+    fileInput,
+    assistantMessages,
+    userMessages,
+    dismissBlockingUI,
+    dismissAndSettle,
+    isPromptReady,
+    waitForEnabled,
+    uploadOverlayVisible,
+    isStopVisible,
+    waitForGenerationEnd,
+    attachFiles,
+    typePrompt,
+    pressSendAndConfirm,
+    sendQuestion,
+    waitForAnswer,
+    looksLoggedOut,
+    resetComposer,
+    startPopupMonitor,
+    buildFullPrompt,
+    buildTextPayload,
+    stageTempPayload,
+    buildDeliveryPlan,
+    buildTransmissionFinale,
+    splitPayloadChunks,
+    buildTransmissionPlan,
+});
+registerProvider(CHATGPT_PROVIDER);
+
+try { require("./providers/gemini"); } catch (e) {}
+
 async function main() {
     if (CLI.showHelp) return showHelp();
     if (CLI.showVersion) return console.log(`v${VERSION}`);
 
-    if (CLI.dryRun && (CLI.login || CLI.logout || CLI.configureBrowser || CLI.configureBrowserOrder || CLI.resetBrowserPrefs || CLI.promptsAction === "manager" || CLI.promptCreate !== null || CLI.clearConversations || CLI.clearConversationId)) {
-        console.log(">> --dry-run can only be combined with a question (optionally with files or a preset). It cannot be combined with standalone actions like --login, --logout, --browser, --browser-order, --browser-reset, --prompts, --prompt-create, --clear-conversations, or --clear-conversation. Exiting without performing any action.");
+    if (CLI.dryRun && (CLI.login || CLI.logout || CLI.configureBrowser || CLI.configureBrowserOrder || CLI.resetBrowserPrefs || CLI.configureAI || CLI.configureAIOrder || CLI.resetAIPrefs || CLI.promptsAction === "manager" || CLI.promptCreate !== null || CLI.clearConversations || CLI.clearConversationId)) {
+        console.log(">> --dry-run can only be combined with a question (optionally with files or a preset). It cannot be combined with standalone actions like --login, --logout, --browser, --browser-order, --browser-reset, --ai, --ai-order, --ai-reset, --prompts, --prompt-create, --clear-conversations, or --clear-conversation. Exiting without performing any action.");
         return;
     }
 
@@ -2756,21 +2991,38 @@ async function main() {
     if (CLI.configureBrowserOrder) return configureBrowserOrder();
     if (CLI.resetBrowserPrefs) return resetBrowserPreferences();
 
+    if (CLI.configureAI) return configureDefaultAI();
+    if (CLI.configureAIOrder) return configureAIOrder();
+    if (CLI.resetAIPrefs) return resetAIPreferences();
+
     if (CLI.clearConversations) return clearAllConversations();
     if (CLI.clearConversationId) return clearConversationById(CLI.clearConversationId);
+
+    let provider;
+    if (CLI.provider) {
+        try {
+            provider = getProvider(CLI.provider);
+        } catch (error) {
+            console.error(`Error: ${error.message}`);
+            process.exit(1);
+        }
+    } else {
+        provider = orderedAIProviders()[0];
+    }
+    console.log(`>> Provider: ${provider.name}`);
 
     if (CLI.logout) {
         const context = await launchBrowser();
         const page = context.pages()[0] || await context.newPage();
         try {
-            await runLogoutFlow(page, context);
+            await provider.runLogoutFlow(page, context);
         } finally {
             await context.close();
         }
         return;
     }
 
-    let targetUrl = URL;
+    let targetUrl = provider.url;
     let continuing = null;
     if (!CLI.login && CLI.continueLast) {
         continuing = CLI.continueConversationId
@@ -2783,6 +3035,20 @@ async function main() {
             throw new Error(`No saved conversation found.${hint} Run a question first, then use --continue.`);
         }
         console.log(`>> Resuming conversation: "${continuing.title || continuing.id}" (${continuing.messages?.length || 0} messages).`);
+
+        const savedProvider = continuing.provider || "chatgpt";
+        if (CLI.provider && CLI.provider !== savedProvider) {
+            console.log(`>> Warning: --provider ${CLI.provider} differs from the conversation's provider (${savedProvider}). Using --provider.`);
+        } else if (!CLI.provider && savedProvider) {
+            try {
+                const resolved = getProvider(savedProvider);
+                provider = resolved;
+                targetUrl = provider.url;
+                console.log(`>> Resuming with provider: ${provider.name}`);
+            } catch {
+                console.log(`>> Saved conversation provider "${savedProvider}" is not available, using ${provider.name}.`);
+            }
+        }
     }
 
     const loginOnly = wantsLogin();
@@ -2797,7 +3063,7 @@ async function main() {
 
     if (CLI.dryRun) {
         const payload = buildFullPrompt(question);
-        process.stdout.write("\n--- DRY RUN: PROMPT THAT WOULD BE SENT TO CHATGPT ---\n");
+        process.stdout.write(`\n--- DRY RUN: PROMPT THAT WOULD BE SENT TO ${provider.name.toUpperCase()} ---\n`);
         process.stdout.write(payload);
         process.stdout.write("\n--- END DRY RUN ---\n");
         console.log(`>> Payload length: ${payload.length} characters`);
@@ -2833,7 +3099,7 @@ async function main() {
     let popupMonitor = null;
     try {
         if (loginOnly) {
-            await runLoginFlow(page, context);
+            await provider.runLoginFlow(page, context);
             return;
         }
         if (continuing) {
@@ -2841,13 +3107,13 @@ async function main() {
                 `>> Replaying ${continuing.messages.length} saved message(s) into a fresh chat${continuing.title ? ` ("${continuing.title}")` : ""}`
             );
         }
-        popupMonitor = startPopupMonitor(page);
+        popupMonitor = provider.startPopupMonitor(page);
         console.log(">> Popup safety monitor active (continuous blocking-UI detection).");
-        const assistantCountBefore = await sendQuestion(page, question, targetUrl, context);
-        const answer = await waitForAnswer(page, assistantCountBefore);
+        const assistantCountBefore = await provider.sendQuestion(page, question, targetUrl, context);
+        const reply = await provider.waitForAnswer(page, assistantCountBefore);
         console.log("\n--- ANSWER ---\n");
-        console.log(answer.trim());
-        const trimmed = answer.trim();
+        console.log(reply.trim());
+        const trimmed = reply.trim();
         console.log(`>> Writing answer to ${CLI.outputFile} (${trimmed.length} chars, mode: ${CLI.outputMode})...`);
         if (CLI.outputMode !== "overwrite") {
             const existing = fs.existsSync(CLI.outputFile)
@@ -2865,9 +3131,10 @@ async function main() {
         }
         const conversation = await recordConversation(page, {
             questionText: question.originalText ?? question.text,
-            answer: answer.trim(),
+            answer: reply.trim(),
             seedMessages: continuing?.messages || [],
             meta: question.deliveryMeta || null,
+            provider: provider.id,
         });
         markPhase("save");
         printTimings();
@@ -2884,7 +3151,25 @@ async function main() {
     }
 }
 
-main().catch((error) => {
-    console.error("Error:", error.message);
-    process.exit(1);
-});
+if (require.main === module) {
+    main().catch((error) => {
+        console.error("Error:", error.message);
+        process.exit(1);
+    });
+}
+
+module.exports = {
+    parseCliArgs,
+    RESERVED_PROMPT_FLAGS,
+    OPTION_DEFINITIONS,
+    DEFAULT_QUESTION,
+    DEFAULT_OUTPUT_FILE,
+    AI_PREFS_FILE,
+    PREFS_FILE,
+    loadAIPrefs,
+    saveAIPrefs,
+    orderedAIProviders,
+    configureDefaultAI,
+    configureAIOrder,
+    resetAIPreferences,
+};

@@ -44,14 +44,18 @@ COMMANDS
   per command. Output is capped at 100 KB per stream (set ASKWEB_MAX_CMD_OUTPUT
   to override). Obvious destructive patterns are blocked.
 
-  --dry-run       Build the prompt payload exactly as it would be sent to
-                   ChatGPT (question, inlined files, command results, and any
-                   <file> blocks) and print it to stdout without launching a
-                   browser or sending anything. Useful for previewing how files
-                   and --cmd outputs are assembled before a real run:
-                     askweb --dry-run "Review this" src/index.js
-                   --dry-run cannot be combined with standalone actions like
-                   --login, --logout, --browser, --prompts, or --clear-*.
+    --dry-run       Build the prompt payload exactly as it would be sent to
+                    ChatGPT (question, inlined files, command results, and any
+                    <file> blocks) and print it to stdout without launching a
+                    browser or sending anything. Useful for previewing how files
+                    and --cmd outputs are assembled before a real run:
+                      askweb --dry-run "Review this" src/index.js
+                    --dry-run cannot be combined with standalone actions like
+                    --login, --logout, --browser, --prompts, --ai, --ai-order,
+                    --ai-reset, or --clear-*.
+                    --provider overrides the AI website for a single run:
+                      askweb --provider gemini "Explain React"
+                    For a full list of providers, see `askweb --help`.
 
 OPTIONS
 {{OPTION_DEFINITIONS}}
@@ -121,6 +125,19 @@ LOGIN & BROWSER
     browser starts logged out/anonymous:
       askweb --clear-session "Who won the 2024 election?"
 
+AI PROVIDERS
+  askweb supports multiple AI providers behind a common interface. ChatGPT is
+  the default; Gemini is also available. Preferences live in .ai-prefs.json
+  (in the install directory).
+    --provider <name>  Use a specific provider for this run only.
+      askweb --provider gemini "Explain React"
+    --ai               Choose the default AI provider interactively.
+    --ai-order         Reorder the AI provider fallback list interactively.
+    --ai-reset         Delete saved AI preferences and return to defaults
+                       (ChatGPT first).
+    When --provider is omitted, askweb uses the default from --ai (or ChatGPT
+    if no preference is saved).
+
 PROMPT PRESETS
   Presets are reusable prompts invoked like native flags (--explain, ...).
   They accept files and a question just like a normal ask:
@@ -141,6 +158,8 @@ CONVERSATIONS
   Each run that returns an answer is saved locally to
   .chatgpt-conversations.json (in the install directory; up to 50 recent
   conversations are kept). Every chat starts fresh by default.
+  Conversation ids are provider-agnostic, so --continue works across
+  providers.
     --continue          Resume the most recent saved conversation.
     --continue <id>     Resume a specific one (full id or unique prefix).
     --new               Start fresh (the default).
