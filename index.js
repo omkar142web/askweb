@@ -21,6 +21,12 @@ const BROWSERS = [
 ];
 const POLL_MS = 500;
 const STABLE_POLLS_REQUIRED = 3;
+const MAX_FILE_CHARS = 400000;
+const SINGLE_PASTE_MAX = 25000;
+const ANON_MAX_PARTS = 6;
+// Empirically validated: single anonymous-chat messages up to ~52 KB paste and land fine.
+const ANON_PART_SIZE_CEILING = 50000;
+const PART_TAG_OVERHEAD = 1000;
 const DEFAULT_QUESTION = "What is JavaScript?";
 const DEFAULT_OUTPUT_FILE = "./output.md";
 const PREFS_FILE = path.join(__dirname, ".browser-prefs.json");
@@ -28,6 +34,22 @@ const CONVERSATIONS_FILE = path.join(__dirname, ".chatgpt-conversations.json");
 const MAX_SAVED_CONVERSATIONS = 50;
 const CONVERSATION_URL_RE = /\/c\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i;
 const AI_PREFS_FILE = path.join(__dirname, ".ai-prefs.json");
+const PASTE_FILE_EXTENSIONS = new Set([
+    ".css",
+    ".csv",
+    ".html",
+    ".js",
+    ".json",
+    ".jsx",
+    ".md",
+    ".py",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+]);
 const PROMPTS_FILE = path.join(__dirname, ".askweb-prompts.json");
 const PROMPT_NAME_RE = /^[-a-z0-9_]+$/i;
 const RESERVED_PROMPT_FLAGS = new Set([
@@ -328,29 +350,6 @@ const {
 
 const { registerProvider, getProvider, getAllProviders } = require("./providers");
 const { createChatGptProvider } = require("./providers/chatgpt");
-const {
-    MAX_FILE_CHARS,
-    SINGLE_PASTE_MAX,
-    ANON_MAX_PARTS,
-    ANON_PART_SIZE_CEILING,
-    PART_TAG_OVERHEAD,
-    PASTE_FILE_EXTENSIONS,
-    DECODE_NOTE,
-    escapeXml,
-    codeFenceFor,
-    fileBlock,
-    shouldPasteFiles,
-    splitPayloadChunks,
-    planTransmissionParts,
-    buildMinimalTransmissionPlan,
-    resolveChunkSizeOverride,
-    buildTransmissionPlan,
-    buildDeliveryPlan,
-    buildTransmissionFinale,
-    formatCommandResult: _formatCommandResult,
-    buildTextPayload: _buildTextPayload,
-    buildFullPrompt: _buildFullPrompt,
-} = require("./lib/payload");
 
 let CHATGPT_PROVIDER = null;
 
@@ -405,6 +404,14 @@ chromium.use(stealth);
 
 const VERSION = require("./package.json").version;
 
+function escapeXml(str) {
+    return str
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
 function resolveMaxCmdOutput() {
     const env = process.env.ASKWEB_MAX_CMD_OUTPUT;
     const parsed = Number(env);
@@ -454,6 +461,33 @@ function runLocalCommand(command) {
         maxOutput,
         blocked: false,
     };
+}
+
+function formatCommandResult(result) {
+    const truncatedStdout = result.stdout.length > result.maxOutput;
+    const truncatedStderr = result.stderr.length > result.maxOutput;
+    const displayStdout = truncatedStdout ? result.stdout.slice(0, result.maxOutput) : result.stdout;
+    const displayStderr = truncatedStderr ? result.stderr.slice(0, result.maxOutput) : result.stderr;
+
+    let block = `<command name="${escapeXml(result.command)}">\n`;
+    block += `<exit_code>${result.exitCode}</exit_code>\n`;
+    if (result.timedOut) {
+        block += `<timed_out>true</timed_out>\n`;
+    }
+    block += `<status>${result.success ? "success" : "failed"}</status>\n`;
+    if (truncatedStdout || truncatedStderr) {
+        block += `<truncated>true</truncated>\n`;
+        block += `<truncation_note>Output was truncated to ${result.maxOutput.toLocaleString()} characters per stream. Set ASKWEB_MAX_CMD_OUTPUT to override.</truncation_note>\n`;
+    }
+    if (result.blocked) {
+        block += `<blocked>true</blocked>\n`;
+    }
+    block += `<stdout>\n${escapeXml(displayStdout)}</stdout>\n`;
+    if (displayStderr) {
+        block += `<stderr>\n${escapeXml(displayStderr)}</stderr>\n`;
+    }
+    block += `</command>`;
+    return block;
 }
 
 async function executeCommands(commands) {
@@ -510,7 +544,13 @@ async function executeCommands(commands) {
 }
 
 function buildTextPayload(question) {
-    return _buildTextPayload(question, escapeXml);
+    const commandBlocks = (question.commandResults || [])
+        .map(formatCommandResult)
+        .join("\n\n");
+    const parts = [];
+    if (commandBlocks) parts.push(commandBlocks);
+    if (question.text) parts.push(question.text);
+    return parts.join("\n\n");
 }
 
 const OPTION_DEFINITIONS = [
@@ -1091,6 +1131,30 @@ function loadFiles(fileRefs) {
     return results;
 }
 
+function shouldPasteFiles(files) {
+    return files.some((file) => PASTE_FILE_EXTENSIONS.has(path.extname(file.name).toLowerCase()));
+}
+
+function codeFenceFor(content) {
+    let longest = 0;
+    for (const match of content.match(/`+/g) || []) {
+        longest = Math.max(longest, match.length);
+    }
+    return "`".repeat(Math.max(3, longest + 1));
+}
+
+function fileBlock(file) {
+    const truncationNote = file.truncated ? `\n(${file.name} was truncated to ${MAX_FILE_CHARS} chars)` : "";
+    if (!file.isText) {
+        return `\n\n<file name="${file.name}" encoding="base64">\n${file.content}\n</file>${truncationNote}`;
+    }
+    const lang = path.extname(file.name).slice(1);
+    const fence = codeFenceFor(file.content);
+    return `\n\n<file name="${file.name}" lang="${lang}">\n${fence}${lang}\n${file.content}\n${fence}\n</file>${truncationNote}`;
+}
+
+const DECODE_NOTE = '\n\nAny <file> block with encoding="base64" contains base64-encoded bytes. Decode those blocks before analyzing them.';
+
 const ACTIVE_TEMP_FILES = [];
 
 function stageTempPayload(payload) {
@@ -1518,7 +1582,20 @@ async function attachFiles(page, files) {
 }
 
 function buildFullPrompt(question, options = {}) {
-    return _buildFullPrompt(question, options, escapeXml);
+    const { includeFiles = true } = options;
+    const commandBlocks = (question.commandResults || [])
+        .map(formatCommandResult)
+        .join("\n\n");
+    const parts = [];
+    if (commandBlocks) parts.push(commandBlocks);
+    if (question.text) parts.push(question.text);
+    if (includeFiles) {
+        const filesBlocks = question.files.map(fileBlock).join("");
+        const hasBinary = question.files.some((file) => !file.isText);
+        if (filesBlocks) parts.push(filesBlocks);
+        if (hasBinary) parts.push(DECODE_NOTE);
+    }
+    return parts.join("\n\n");
 }
 
 const COMPOSER_CHUNK = 16000;
@@ -1671,6 +1748,69 @@ async function typePrompt(page, input, text) {
     await page.waitForTimeout(400);
 }
 
+function splitPayloadChunks(text, size) {
+    const chunks = [];
+    let offset = 0;
+    while (offset < text.length) {
+        let end = Math.min(offset + size, text.length);
+        const lastCode = text.charCodeAt(end - 1);
+        if (lastCode >= 0xd800 && lastCode <= 0xdbff && end < text.length) end += 1;
+        chunks.push(text.slice(offset, end));
+        offset = end;
+    }
+    return chunks;
+}
+
+function buildTransmissionPlan(payload, chunkSize) {
+    const chunks = splitPayloadChunks(payload, chunkSize);
+    const total = chunks.length;
+    const header = [
+        `[TRANSMISSION HEADER] I am sending a document in ${total} numbered part(s).`,
+        "Each part is delimited by [PAYLOAD PART i/N] ... [/PAYLOAD PART i/N].",
+        'After each part, reply with ONLY "OK". Do not analyze or answer anything yet.',
+        "When I send TRANSMISSION COMPLETE, then answer my question.",
+    ].join("\n");
+
+    const parts = chunks.map((chunk, i) => {
+        const open = `[PAYLOAD PART ${i + 1}/${total} chars=${chunk.length}]`;
+        const close = `[/PAYLOAD PART ${i + 1}/${total}]`;
+        const body = `${open}\n${chunk}\n${close}`;
+        return i === 0 ? `${header}\n\n${body}` : body;
+    });
+    return { parts, totalParts: total, totalChars: payload.length };
+}
+
+function planTransmissionParts(payloadLength) {
+    const usablePerPart = ANON_PART_SIZE_CEILING - PART_TAG_OVERHEAD;
+    return Math.max(1, Math.ceil(payloadLength / usablePerPart));
+}
+
+function buildMinimalTransmissionPlan(payload) {
+    const totalParts = planTransmissionParts(payload.length);
+    return buildTransmissionPlan(payload, Math.ceil(payload.length / totalParts));
+}
+
+function resolveChunkSizeOverride() {
+    const manual = Number(process.env.ASKWEB_CHUNK_SIZE);
+    return Number.isFinite(manual) && manual > 0 ? Math.floor(manual) : null;
+}
+
+function buildDeliveryPlan(payload) {
+    const manualChunkSize = resolveChunkSizeOverride();
+    if (manualChunkSize) {
+        console.log(`>> Using manual chunk size override: ${manualChunkSize} chars (${(manualChunkSize / 1024).toFixed(1)} KB).`);
+    }
+    return {
+        plan: manualChunkSize ? buildTransmissionPlan(payload, manualChunkSize) : buildMinimalTransmissionPlan(payload),
+        manualChunkSize,
+    };
+}
+
+function buildTransmissionFinale(total, finalQuestion) {
+    const confirm = `TRANSMISSION COMPLETE - all ${total} part(s) sent (1..${total}). Now answer my question below.`;
+    return finalQuestion ? `${confirm}\n\nMy question: ${finalQuestion}` : confirm;
+}
+
 async function waitForGenerationEnd(page, timeoutMs = 10 * 60 * 1000) {
     const deadline = Date.now() + timeoutMs;
     let noticed = false;
@@ -1718,11 +1858,26 @@ async function waitForSendReady(page) {
     }
 }
 
+async function transcriptContainsCloseTag(page, closeTag) {
+    return page
+        .evaluate(
+            ({ selector, needle }) => {
+                const msgs = document.querySelectorAll(selector);
+                for (const msg of msgs) {
+                    if ((msg.innerText || "").includes(needle)) return true;
+                }
+                return false;
+            },
+            { selector: selector("userMessage"), needle: closeTag }
+        )
+        .catch(() => false);
+}
+
 async function waitForPartLanding(page, closeTag, timeoutMs = 30000) {
     const deadline = Date.now() + timeoutMs;
     let lastSnippet = "";
     while (Date.now() < deadline) {
-        if (await transcriptContainsText(page, closeTag)) return { ok: true, snippet: "" };
+        if (await transcriptContainsCloseTag(page, closeTag)) return { ok: true, snippet: "" };
         lastSnippet = await page
             .evaluate(
                 (selector) => {
@@ -1787,7 +1942,7 @@ async function transmitPart(page, input, part, index, total) {
     for (let attempt = 1; attempt <= 2; attempt++) {
         // A prior attempt may have landed without being confirmed (virtualized transcript
         // hid it from the old count-based check) - never resend a part already in the chat.
-        if (attempt > 1 && (await transcriptContainsText(page, closeTag))) {
+        if (attempt > 1 && (await transcriptContainsCloseTag(page, closeTag))) {
             console.log(`>> Part ${index}/${total} is already in the transcript, treating as landed.`);
             return true;
         }
@@ -2815,6 +2970,7 @@ CHATGPT_PROVIDER = createChatGptProvider({
     gotoChatGPT,
     waitForChatGPTReady,
     isLoggedInViaCookies,
+    isOnAuthPage,
     runLoginFlow,
     runLogoutFlow,
     promptInput,

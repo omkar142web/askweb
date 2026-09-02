@@ -103,6 +103,21 @@ async function waitForPartLanding(page, closeTag, timeoutMs = 30000) {
     return { ok: false, snippet: lastSnippet };
 }
 
+async function transcriptContainsCloseTag(page, closeTag) {
+    return page
+        .evaluate(
+            ({ userSel, needle }) => {
+                const msgs = document.querySelectorAll(userSel);
+                for (const msg of msgs) {
+                    if ((msg.innerText || "").includes(needle)) return true;
+                }
+                return false;
+            },
+            { userSelector: ui.selector("userMessage"), needle: closeTag }
+        )
+        .catch(() => false);
+}
+
 function composerHasContent(page, needle, minLength) {
     return ui.promptInput(page)
         .evaluate(
@@ -175,7 +190,7 @@ async function transmitPart(page, input, part, index, total) {
     const closeTag = `[/PAYLOAD PART ${index}/${total}]`;
 
     for (let attempt = 1; attempt <= 2; attempt++) {
-        if (attempt > 1 && (await ui.transcriptContainsText(page, closeTag))) {
+        if (attempt > 1 && (await transcriptContainsCloseTag(page, closeTag))) {
             console.log(`>> Part ${index}/${total} is already in the transcript, treating as landed.`);
             return true;
         }
