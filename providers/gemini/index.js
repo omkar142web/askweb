@@ -273,6 +273,7 @@ async function looksLoggedOut(page) {
 }
 
 async function sendQuestion(page, question, targetUrl, context) {
+    console.log(">> Sending question via Gemini...");
     await gotoGemini(page, targetUrl);
     await page.waitForTimeout(2000);
 
@@ -409,6 +410,7 @@ async function sendQuestion(page, question, targetUrl, context) {
     if (deliveryPlan) {
         const finalQuestion = question.text || "";
         const baseline = await sendChunkedPayload(page, finalInput, deliveryPlan, finalQuestion);
+        console.log(`>> Chunked transmission complete (baseline: ${baseline} replies).`);
         return baseline;
     }
 

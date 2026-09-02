@@ -2163,6 +2163,7 @@ async function sendQuestion(page, question, targetUrl = URL, context = null) {
     if (deliveryPlan) {
         const finalInput = promptInput(page);
         const baseline = await sendChunkedPayload(page, finalInput, deliveryPlan, question.originalText ?? question.text);
+        console.log(`>> Chunked transmission complete (baseline: ${baseline} replies).`);
         markPhase("write");
         markPhase("send");
         return baseline;
@@ -2960,9 +2961,20 @@ async function launchBrowser() {
 }
 
 async function loadQuestion() {
+    console.log(">> Loading question and attachments...");
     const question = parseQuestion();
+    console.log(
+        `>> Parsed: text="${(question.text || "").slice(0, 80).replace(/\s+/g, " ").trim()}${
+            (question.text || "").length > 80 ? "..." : ""
+        }" | files: ${question.files.length} | commands: ${CLI.commands.length}`
+    );
     question.files = loadFiles(question.files);
     question.commandResults = await executeCommands(CLI.commands);
+    console.log(
+        `>> Question ready (text: ${(question.text || "").length} chars, files: ${question.files.length}, command results: ${
+            question.commandResults.length
+        }).`
+    );
     return question;
 }
 
@@ -3008,27 +3020,65 @@ registerProvider(CHATGPT_PROVIDER);
 try { require("./providers/gemini"); } catch (e) {}
 
 async function main() {
-    if (CLI.showHelp) return showHelp();
-    if (CLI.showVersion) return console.log(`v${VERSION}`);
+    console.log(`>> askweb v${VERSION}`);
+    if (CLI.showHelp) {
+        console.log(">> Mode: help");
+        return showHelp();
+    }
+    if (CLI.showVersion) {
+        console.log(">> Mode: version");
+        return console.log(`v${VERSION}`);
+    }
 
     if (CLI.dryRun && (CLI.login || CLI.logout || CLI.configureBrowser || CLI.configureBrowserOrder || CLI.resetBrowserPrefs || CLI.configureAI || CLI.configureAIOrder || CLI.resetAIPrefs || CLI.promptsAction === "manager" || CLI.promptCreate !== null || CLI.clearConversations || CLI.clearConversationId)) {
+        console.log(">> Mode: dry-run (rejected - incompatible flags)");
         console.log(">> --dry-run can only be combined with a question (optionally with files or a preset). It cannot be combined with standalone actions like --login, --logout, --browser, --browser-order, --browser-reset, --ai, --ai-order, --ai-reset, --prompts, --prompt-create, --clear-conversations, or --clear-conversation. Exiting without performing any action.");
         return;
     }
 
-    if (CLI.promptCreate !== null) return createPromptFlow(CLI.promptCreate);
-    if (CLI.promptsAction === "manager") return runPromptManager();
+    if (CLI.promptCreate !== null) {
+        console.log(">> Mode: prompt create");
+        return createPromptFlow(CLI.promptCreate);
+    }
+    if (CLI.promptsAction === "manager") {
+        console.log(">> Mode: prompt manager");
+        return runPromptManager();
+    }
 
-    if (CLI.configureBrowser) return configureDefaultBrowser();
-    if (CLI.configureBrowserOrder) return configureBrowserOrder();
-    if (CLI.resetBrowserPrefs) return resetBrowserPreferences();
+    if (CLI.configureBrowser) {
+        console.log(">> Mode: browser configuration");
+        return configureDefaultBrowser();
+    }
+    if (CLI.configureBrowserOrder) {
+        console.log(">> Mode: browser order configuration");
+        return configureBrowserOrder();
+    }
+    if (CLI.resetBrowserPrefs) {
+        console.log(">> Mode: browser preferences reset");
+        return resetBrowserPreferences();
+    }
 
-    if (CLI.configureAI) return configureDefaultAI();
-    if (CLI.configureAIOrder) return configureAIOrder();
-    if (CLI.resetAIPrefs) return resetAIPreferences();
+    if (CLI.configureAI) {
+        console.log(">> Mode: AI configuration");
+        return configureDefaultAI();
+    }
+    if (CLI.configureAIOrder) {
+        console.log(">> Mode: AI order configuration");
+        return configureAIOrder();
+    }
+    if (CLI.resetAIPrefs) {
+        console.log(">> Mode: AI preferences reset");
+        return resetAIPreferences();
+    }
 
-    if (CLI.clearConversations) return clearAllConversations();
-    if (CLI.clearConversationId) return clearConversationById(CLI.clearConversationId);
+    if (CLI.clearConversations) {
+        console.log(">> Mode: clear all conversations");
+        return clearAllConversations();
+    }
+    if (CLI.clearConversationId) {
+        console.log(">> Mode: clear conversation");
+        return clearConversationById(CLI.clearConversationId);
+    }
 
     let provider;
     if (CLI.provider) {
@@ -3044,6 +3094,7 @@ async function main() {
     console.log(`>> Provider: ${provider.name}`);
 
     if (CLI.logout) {
+        console.log(">> Mode: logout");
         const context = await launchBrowser();
         const page = context.pages()[0] || await context.newPage();
         try {
@@ -3084,10 +3135,19 @@ async function main() {
     if (loginOnly) {
         console.log(">> Login mode: launching browser for manual login...");
     }
+    if (CLI.dryRun) {
+        console.log(">> Mode: dry run");
+    } else if (loginOnly) {
+        console.log(">> Mode: login");
+    } else {
+        console.log(">> Mode: question");
+    }
     const question = loginOnly ? null : await loadQuestion();
     if (question && continuing) {
+        console.log(">> Building continuation prompt from saved history...");
         question.originalText = question.text;
         question.text = buildContinuationPrompt(continuing.messages || [], question.text);
+        console.log(`>> Continuation prompt built (history: ${continuing.messages.length} messages, ${question.text.length} chars total).`);
     }
 
     if (CLI.dryRun) {
@@ -3099,6 +3159,7 @@ async function main() {
         return;
     }
 
+    console.log(">> Launching browser...");
     const context = await launchBrowser();
     markPhase("browser");
     console.log(">> Granting clipboard permissions...");
@@ -3139,6 +3200,7 @@ async function main() {
         popupMonitor = provider.startPopupMonitor(page);
         console.log(">> Popup safety monitor active (continuous blocking-UI detection).");
         const assistantCountBefore = await provider.sendQuestion(page, question, targetUrl, context);
+        console.log(">> Prompt sent, waiting for response...");
         const reply = await provider.waitForAnswer(page, assistantCountBefore);
         console.log("\n--- ANSWER ---\n");
         console.log(reply.trim());
@@ -3177,6 +3239,7 @@ async function main() {
         if (popupMonitor) popupMonitor.stop();
         cleanupTempPayloads();
         await context.close();
+        console.log(">> Session ended.");
     }
 }
 
