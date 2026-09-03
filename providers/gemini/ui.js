@@ -607,8 +607,11 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
     }
 
     console.log(">> Answer received, waiting for generation to stabilize...");
-    const STABLE_POLLS_REQUIRED = 3;
-    const POLL_MS = 500;
+    // Reduced from 3 to 2 polls: the stop button disappearing already strongly
+    // signals completion, and 2 polls (0.8s) gives enough time for text to settle.
+    const STABLE_POLLS_REQUIRED = 2;
+    // Reduced from 500ms to 400ms for slightly faster response.
+    const POLL_MS = 400;
     const stabStart = Date.now();
     let stableCount = 0;
     let textStableCount = 0;
@@ -639,7 +642,14 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
             console.log(`>> Still generating... (poll ${totalPolls}, current length: ${lastLength} chars, stop visible: ${stopVisible}).`);
         }
 
-        // If the text has been stable for 3+ consecutive polls but the stop
+        // Early exit: if the stop button is no longer visible and text is non-empty,
+        // generation has completed. No need to wait for text stability.
+        if (!stopVisible && lastLength > 0) {
+            console.log(`>> Stop button disappeared and text is non-empty (${lastLength} chars); treating generation as complete.`);
+            break;
+        }
+
+        // If the text has been stable for 2+ consecutive polls but the stop
         // button is still visible, the generation has likely completed but
         // the UI hasn't hidden the stop button yet. Proceed using text-only
         // stability as the signal.

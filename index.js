@@ -19,8 +19,11 @@ const BROWSERS = [
     { name: "brave", executablePath: `${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`, profileDir: path.join(APP_DIR, "user-data-brave") },
     { name: "edge", channel: "msedge", profileDir: path.join(APP_DIR, "user-data-edge") },
 ];
-const POLL_MS = 500;
-const STABLE_POLLS_REQUIRED = 3;
+// Reduced from 500 to 400ms for slightly faster stabilization polling.
+const POLL_MS = 400;
+// Reduced from 3 to 2 polls: the stop button disappearing already strongly
+// signals completion, and 2 polls (0.8s) gives enough time for text to settle.
+const STABLE_POLLS_REQUIRED = 2;
 const MAX_FILE_CHARS = 400000;
 const SINGLE_PASTE_MAX = 25000;
 const ANON_MAX_PARTS = 6;
@@ -2363,7 +2366,7 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
         textStableCount = textStable ? textStableCount + 1 : 0;
         prevLength = lastLength;
 
-        if (!unchanged && totalPolls > 0 && totalPolls % 5 === 0) {
+    if (!unchanged && totalPolls > 0 && totalPolls % 5 === 0) {
             console.log(`>> Still generating... (poll ${totalPolls}, current length: ${lastLength} chars, stop visible: ${stopVisible}).`);
         }
 
