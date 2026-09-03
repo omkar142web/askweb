@@ -106,11 +106,11 @@ function wireCopyButton(page, buttonId, copyText) {
         navigator.clipboard.readText = async () => clipboard;
     });
     const answer3 = ui.assistantMessages(page).last();
-    const extracted3 = await ui.extractAnswerMarkdown(page, answer3);
+    const extracted3 = await ui.extractAnswerMarkdown(page, answer3, { buttonPollDeadlineMs: 300 });
     check("extractAnswerMarkdown: returns null when copy button absent", extracted3 === null);
 
     // =================================================================
-    // Test 4: waitForAnswer falls back to innerText when no copy button
+    // Test 4: waitForAnswer throws when copy button is unavailable (no fallback)
     // =================================================================
     await page.setContent(`<div id="app">${renderGeminiResponse({ copyButton: false })}</div>`);
     await page.evaluate(() => {
@@ -118,8 +118,14 @@ function wireCopyButton(page, buttonId, copyText) {
         navigator.clipboard.writeText = async (text) => { clipboard = text; };
         navigator.clipboard.readText = async () => clipboard;
     });
-    const result4 = await ui.waitForAnswer(page, 0);
-    check("waitForAnswer: returns content via innerText fallback", typeof result4 === "string" && result4.length > 0);
+    const result4Promise = ui.waitForAnswer(page, 0, { buttonPollDeadlineMs: 300 });
+    let threw4 = false;
+    try {
+        await result4Promise;
+    } catch (e) {
+        threw4 = true;
+    }
+    check("waitForAnswer: throws when copy button unavailable (no fallback)", threw4);
 
     // =================================================================
     // Test 5: waitForAnswer uses copy button when present

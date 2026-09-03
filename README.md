@@ -325,10 +325,10 @@ The output path (`-o`) is resolved relative to your current working directory;
 all other paths (browser profiles, history, preferences) live in the install
 directory.
 
-The answer is captured from the browser's copy button and read from the
-clipboard when possible; otherwise it falls back to the rendered message text.
-The browser context is granted `clipboard-read` and `clipboard-write`
-permissions for reliable extraction.
+The answer is captured exclusively from the browser's copy button and read
+from the clipboard, which preserves the original Markdown formatting. The
+browser context is granted `clipboard-read` and `clipboard-write` permissions
+for reliable extraction.
 
 ## Login & Browser
 
@@ -412,7 +412,7 @@ ASKWEB_MAX_CMD_OUTPUT=20000 node index.js --cmd "git log"
 - Brave's executable path is hardcoded for Windows in `index.js`:
   - `executablePath: ${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`
   - On macOS/Linux, `LOCALAPPDATA` is undefined and Brave may be skipped silently.
-- If the provider's copy button is unavailable, the tool falls back to rendered text (`innerText()`), which may lose Markdown formatting.
+- If the provider's copy button is unavailable, the tool polls rapidly for up to 10 seconds before reporting an error. Re-run or refresh the page to retry.
 - Some ChatGPT UI changes may require selector updates in `chatgpt-ui.js`.
 - Maximum of 50 saved conversations in `.chatgpt-conversations.json`.
 - Anonymous (logged-out) chats are capped at ~293 KB of transmitted content
@@ -437,8 +437,8 @@ ASKWEB_MAX_CMD_OUTPUT=20000 node index.js --cmd "git log"
 #   - Log in inside the opened window, or run: node index.js --clear-session --login
 
 # Answer contains no Markdown formatting
-#   - The copy button may be unavailable in the provider's web UI
-#   - Re-run; the tool falls back to rendered text when the copy button is absent
+#   - The copy button was not found within the polling window
+#   - Re-run or refresh the browser page to retry
 
 # Anonymous chat caps out / large prompt is refused
 #   - Anonymous chats accept about 293 KB across ~6 parts

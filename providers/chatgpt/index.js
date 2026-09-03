@@ -112,7 +112,7 @@ function createChatGptProvider(deps) {
         typePrompt: (page, input, text) => typePrompt(page, input, text),
         sendPrompt: (page) => pressSendAndConfirm(page),
         sendQuestion: (page, question, targetUrl, context) => sendQuestion(page, question, CHATGPT_URL, context),
-        waitForAnswer: (page, countBefore) => waitForAnswer(page, countBefore),
+        waitForAnswer: (page, countBefore, options) => waitForAnswer(page, countBefore, options),
 
         looksLoggedOut: (page) => looksLoggedOut(page),
         resetComposer: (page, targetUrl, context) => resetComposer(page, CHATGPT_URL, context),

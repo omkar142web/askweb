@@ -68,6 +68,35 @@ function baseDOM(options = {}) {
     `;
 }
 
+// Install a clipboard mock on the page and wire all copy buttons to write
+// the given text when clicked. Must be called after page.setContent (or
+// after dynamically adding a response with a copy button).
+async function installCopyClipboard(page, text) {
+    await page.evaluate((copyText) => {
+        let clipboard = "";
+        try {
+            Object.defineProperty(navigator, "clipboard", {
+                value: {
+                    writeText: async (t) => { clipboard = t; },
+                    readText: async () => clipboard,
+                },
+                configurable: true,
+            });
+        } catch (e) {
+            // navigator.clipboard already defined and non-configurable
+            if (navigator.clipboard) {
+                navigator.clipboard.writeText = async (t) => { clipboard = t; };
+                navigator.clipboard.readText = async () => clipboard;
+            }
+        }
+        document
+            .querySelectorAll('button[aria-label="Copy"]:not([aria-label*="code" i])')
+            .forEach((btn) => {
+                btn.addEventListener("click", () => { navigator.clipboard.writeText(copyText); });
+            });
+    }, text);
+}
+
 (async () => {
     const browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
@@ -169,11 +198,12 @@ function baseDOM(options = {}) {
     // =====================================================================
     await page.setContent(`
         <div id="app">
-            <model-response><div class="response-content">Already-present response</div></model-response>
+            <model-response><div class="response-content">Already-present response</div><button aria-label="Copy">Copy</button></model-response>
             <textarea id="composer" aria-label="Enter a prompt for Gemini" style="display:block"></textarea>
             <button aria-label="Stop" style="display:none">Stop</button>
         </div>
     `);
+    await installCopyClipboard(page, "Already-present response");
 
     const answer7 = await ui.waitForAnswer(page, 0);
     check("waitForAnswer: detects pre-existing response when count grew from 0", answer7.includes("Already-present response"));
@@ -192,9 +222,30 @@ function baseDOM(options = {}) {
     const answerPromise2 = ui.waitForAnswer(page, 1);
     await page.waitForTimeout(300);
     await page.evaluate(() => {
+        // Set up clipboard mock so extractAnswerMarkdown can read it
+        let clipboard = "";
+        try {
+            Object.defineProperty(navigator, "clipboard", {
+                value: {
+                    writeText: async (t) => { clipboard = t; },
+                    readText: async () => clipboard,
+                },
+                configurable: true,
+            });
+        } catch (e) {
+            if (navigator.clipboard) {
+                navigator.clipboard.writeText = async (t) => { clipboard = t; };
+                navigator.clipboard.readText = async () => clipboard;
+            }
+        }
         const el = document.createElement("model-response");
-        el.innerHTML = '<div class="response-content">This is the new answer</div>';
+        el.innerHTML = '<div class="response-content">This is the new answer</div><button aria-label="Copy">Copy</button>';
         document.getElementById("app").appendChild(el);
+        // Wire the copy button to write the response text to the mock clipboard
+        const btn = el.querySelector('button[aria-label="Copy"]');
+        if (btn) {
+            btn.addEventListener("click", () => { navigator.clipboard.writeText("This is the new answer"); });
+        }
     });
     const answer8 = await answerPromise2;
     check("waitForAnswer: detects new response when count grew", answer8.includes("This is the new answer"));
@@ -208,11 +259,12 @@ function baseDOM(options = {}) {
     // =====================================================================
     await page.setContent(`
         <div id="app">
-            <model-response><div class="response-content">Complete and stable answer</div></model-response>
+            <model-response><div class="response-content">Complete and stable answer</div><button aria-label="Copy">Copy</button></model-response>
             <textarea id="composer" aria-label="Enter a prompt for Gemini" style="display:block"></textarea>
             <button aria-label="Stop" style="display:block">Stop</button>
         </div>
     `);
+    await installCopyClipboard(page, "Complete and stable answer");
 
     // Wrap in a timeout so the test fails fast instead of hanging the suite
     // if a regression reintroduces the infinite loop.

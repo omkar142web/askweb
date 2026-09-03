@@ -575,7 +575,7 @@ const provider = {
     resetComposer: (page, targetUrl) => ui.dismissAndSettle(page),
 
     sendQuestion: (page, question, targetUrl, context) => sendQuestion(page, question, targetUrl || GEMINI_URL, context),
-    waitForAnswer: (page, countBefore) => ui.waitForAnswer(page, countBefore),
+    waitForAnswer: (page, countBefore, options) => ui.waitForAnswer(page, countBefore, options),
 
     getConversationId: async (page) => {
         const urlMatch = page.url().match(/\/gemini\/s\/[^/?#]+/i);

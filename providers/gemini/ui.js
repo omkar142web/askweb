@@ -522,20 +522,34 @@ async function findCopyButton(page, answer) {
     return null;
 }
 
-async function extractAnswerMarkdown(page, answer) {
+async function extractAnswerMarkdown(page, answer, options = {}) {
+    const {
+        pollIntervalMs = 50,
+        buttonPollDeadlineMs = 10000,
+        clipboardPollDeadlineMs = 5000,
+    } = options;
+
     console.log(">> Clearing clipboard for answer extraction...");
     await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => {});
 
     // Gemini hides copy buttons until hover (mat-badge-hidden, etc.).
-    // Hover the answer first to reveal them.
+    // Hover once to reveal them, then poll rapidly — no fixed wait — so
+    // we trigger the copy action the instant the button becomes available.
     await answer.hover({ timeout: 2000, force: true }).catch(() => {});
-    await page.waitForTimeout(200);
 
-    const copyButton = await findCopyButton(page, answer);
+    const buttonDeadline = Date.now() + buttonPollDeadlineMs;
+    let copyButton = null;
+    while (Date.now() < buttonDeadline) {
+        copyButton = await findCopyButton(page, answer);
+        if (copyButton) break;
+        await page.waitForTimeout(pollIntervalMs);
+    }
+
     if (!copyButton) {
-        console.log(">> Copy button not found in answer block.");
+        console.log(">> Copy button not found in answer block after polling.");
         return null;
     }
+
     console.log(">> Copy button found, clicking...");
     try {
         await copyButton.click({ timeout: 5000 });
@@ -554,8 +568,16 @@ async function extractAnswerMarkdown(page, answer) {
         }
     }
 
-    await page.waitForTimeout(400);
-    const text = await page.evaluate(() => navigator.clipboard.readText()).catch(() => "");
+    // Poll the clipboard rapidly instead of a fixed post-click delay so we
+    // return as soon as the copied content is available.
+    const clipboardDeadline = Date.now() + clipboardPollDeadlineMs;
+    let text = "";
+    while (Date.now() < clipboardDeadline) {
+        text = await page.evaluate(() => navigator.clipboard.readText()).catch(() => "");
+        if (typeof text === "string" && text.trim()) break;
+        await page.waitForTimeout(pollIntervalMs);
+    }
+
     if (typeof text === "string" && text.trim()) {
         console.log(`>> Clipboard read successful (${text.length} chars).`);
     } else {
@@ -564,7 +586,7 @@ async function extractAnswerMarkdown(page, answer) {
     return typeof text === "string" && text.trim() ? text : null;
 }
 
-async function waitForAnswer(page, assistantCountBefore = 0) {
+async function waitForAnswer(page, assistantCountBefore = 0, options = {}) {
     console.log(">> Waiting for answer to appear...");
     const replies = assistantMessages(page);
     const previousLastText = (await replies.last().innerText().catch(() => "")).trim();
@@ -666,14 +688,14 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
     }
 
     console.log(`>> Generation stable (${totalPolls} polls, final length: ${prevLength} chars, took ${Date.now() - stabStart}ms).`);
-    let markdown = await extractAnswerMarkdown(page, answer);
-    if (markdown) {
-        console.log(`>> Raw Markdown captured via copy button (${markdown.length} chars).`);
-    } else {
-        console.log(">> Copy button unavailable, falling back to rendered text.");
-        markdown = await answer.innerText().catch(() => "");
-        await page.evaluate((text) => navigator.clipboard.writeText(text), markdown).catch(() => {});
+    let markdown = await extractAnswerMarkdown(page, answer, options);
+    if (!markdown) {
+        throw new Error(
+            "Failed to capture response via Gemini's Copy button — no fallback is configured. " +
+            "Wait for the response to finish generating, then re-run."
+        );
     }
+    console.log(`>> Raw Markdown captured via copy button (${markdown.length} chars).`);
     return markdown;
 }
 
