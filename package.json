@@ -7,7 +7,7 @@
     "askweb": "index.js"
   },
   "scripts": {
-    "test": "node tests/provider-registry.test.js && node tests/cli-args.test.js && node tests/ai-preferences.test.js && node tests/popup-resilience.test.js && node tests/gemini-anchor-fix.test.js && node tests/gemini-send-confirm.test.js",
+    "test": "node tests/provider-registry.test.js && node tests/cli-args.test.js && node tests/ai-preferences.test.js && node tests/popup-resilience.test.js && node tests/gemini-anchor-fix.test.js && node tests/gemini-send-confirm.test.js && node tests/gemini-markdown-copy.test.js",
     "test:popup": "node tests/popup-resilience.test.js",
     "ask": "node index.js",
     "new": "node index.js --new",

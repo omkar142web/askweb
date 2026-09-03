@@ -410,9 +410,9 @@ ASKWEB_MAX_CMD_OUTPUT=20000 node index.js --cmd "git log"
 ## Known Issues
 
 - Brave's executable path is hardcoded for Windows in `index.js`:
-  - `executablePath: ${process.env.LOCALAPPDATA}\BraveSoftware\Brave-Browser\Application\brave.exe`
+  - `executablePath: ${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`
   - On macOS/Linux, `LOCALAPPDATA` is undefined and Brave may be skipped silently.
-- Markdown extraction via `innerText()` may lose original formatting.
+- If the provider's copy button is unavailable, the tool falls back to rendered text (`innerText()`), which may lose Markdown formatting.
 - Some ChatGPT UI changes may require selector updates in `chatgpt-ui.js`.
 - Maximum of 50 saved conversations in `.chatgpt-conversations.json`.
 - Anonymous (logged-out) chats are capped at ~293 KB of transmitted content
@@ -437,8 +437,8 @@ ASKWEB_MAX_CMD_OUTPUT=20000 node index.js --cmd "git log"
 #   - Log in inside the opened window, or run: node index.js --clear-session --login
 
 # Answer contains no Markdown formatting
-#   - The copy button may be unavailable
-#   - Re-run; the tool falls back to rendered text
+#   - The copy button may be unavailable in the provider's web UI
+#   - Re-run; the tool falls back to rendered text when the copy button is absent
 
 # Anonymous chat caps out / large prompt is refused
 #   - Anonymous chats accept about 293 KB across ~6 parts

@@ -53,6 +53,13 @@ const ATTACH_BUTTON_SELECTORS = [
     'input[type="file"]',
 ];
 
+const COPY_BUTTON_SELECTORS = [
+    'gem-icon-button button[aria-label="Copy"]',
+    'button[aria-label="Copy"]:not([aria-label*="prompt" i]):not([aria-label*="code" i]):not([aria-label*="image" i])',
+    'button[aria-label*="Copy" i]:not([aria-label*="prompt" i]):not([aria-label*="code" i]):not([aria-label*="image" i])',
+    '[data-testid*="copy" i]:not([data-testid*="code" i]):not([data-testid*="image" i])',
+];
+
 const FILE_INPUT_SELECTOR = 'input[type="file"]';
 
 const MODAL_OVERLAY_SELECTORS = [
@@ -74,6 +81,7 @@ const SELECTORS = {
     userMessage: USER_MESSAGE_SELECTORS,
     attachButton: ATTACH_BUTTON_SELECTORS,
     fileInput: [FILE_INPUT_SELECTOR],
+    copyButton: COPY_BUTTON_SELECTORS,
     messageBoundary: ['[data-message-author]', 'model-response', 'user-query', 'message-content'],
 };
 
@@ -476,6 +484,86 @@ async function transcriptContainsText(page, needle) {
         .catch(() => false);
 }
 
+// Exclude code-block copy buttons (aria-label contains "code"), image
+// copy buttons (aria-label contains "image"), and prompt copy buttons
+// (aria-label contains "prompt") so we only match the response-level
+// copy button.
+const GENERIC_COPY_BUTTON_FALLBACK = 'button[aria-label*="copy" i]:not([aria-label*="code" i]):not([aria-label*="image" i]):not([aria-label*="prompt" i])';
+
+async function findCopyButton(page, answer) {
+    const parent = answer.locator("xpath=..");
+    // The copy button in Gemini lives inside <model-response> or
+    // .response-container, but the answer element (MESSAGE-CONTENT) may
+    // be nested deeper. Search answer → parent → model-response ancestor → page.
+    const responseAncestor = answer.locator("xpath=ancestor::model-response").first();
+    const scopes = [answer, parent, responseAncestor, page];
+    // Tiers of selectors, most specific first
+    const tiers = [
+        selector("copyButton"),
+        GENERIC_COPY_BUTTON_FALLBACK,
+    ];
+    for (const sel of tiers) {
+        for (const scope of scopes) {
+            // Use .first() rather than .last() so that when multiple copy buttons
+            // match (e.g. code-block copy buttons alongside the response-level
+            // copy button), we still pick the first match within the scope.
+            // The GENERIC_COPY_BUTTON_FALLBACK excludes buttons whose aria-label
+            // contains "code", "image", or "prompt", filtering out code-block
+            // copy buttons and prompt copy buttons.
+            const button = scope.locator(sel).first();
+            if ((await button.count()) > 0 && (await button.isVisible().catch(() => false))) {
+                const scopeName = scope === answer ? "answer" : scope === parent ? "parent" : scope === responseAncestor ? "response-ancestor" : "page";
+                console.log(`>> Copy button found (scope: ${scopeName}).`);
+                return button;
+            }
+        }
+    }
+    console.log(">> No visible copy button found in any tier.");
+    return null;
+}
+
+async function extractAnswerMarkdown(page, answer) {
+    console.log(">> Clearing clipboard for answer extraction...");
+    await page.evaluate(() => navigator.clipboard.writeText("")).catch(() => {});
+
+    // Gemini hides copy buttons until hover (mat-badge-hidden, etc.).
+    // Hover the answer first to reveal them.
+    await answer.hover({ timeout: 2000, force: true }).catch(() => {});
+    await page.waitForTimeout(200);
+
+    const copyButton = await findCopyButton(page, answer);
+    if (!copyButton) {
+        console.log(">> Copy button not found in answer block.");
+        return null;
+    }
+    console.log(">> Copy button found, clicking...");
+    try {
+        await copyButton.click({ timeout: 5000 });
+    } catch {
+        console.log(">> Copy button click failed, retrying with force...");
+        try {
+            await copyButton.click({ timeout: 3000, force: true });
+        } catch {
+            console.log(">> Copy button force-click failed, retrying with DOM click...");
+            try {
+                await copyButton.evaluate((button) => button.click());
+            } catch {
+                console.log(">> Copy button DOM click also failed.");
+                return null;
+            }
+        }
+    }
+
+    await page.waitForTimeout(400);
+    const text = await page.evaluate(() => navigator.clipboard.readText()).catch(() => "");
+    if (typeof text === "string" && text.trim()) {
+        console.log(`>> Clipboard read successful (${text.length} chars).`);
+    } else {
+        console.log(">> Clipboard read returned empty content.");
+    }
+    return typeof text === "string" && text.trim() ? text : null;
+}
+
 async function waitForAnswer(page, assistantCountBefore = 0) {
     console.log(">> Waiting for answer to appear...");
     const replies = assistantMessages(page);
@@ -568,7 +656,15 @@ async function waitForAnswer(page, assistantCountBefore = 0) {
     }
 
     console.log(`>> Generation stable (${totalPolls} polls, final length: ${prevLength} chars, took ${Date.now() - stabStart}ms).`);
-    return await answer.innerText().catch(() => "");
+    let markdown = await extractAnswerMarkdown(page, answer);
+    if (markdown) {
+        console.log(`>> Raw Markdown captured via copy button (${markdown.length} chars).`);
+    } else {
+        console.log(">> Copy button unavailable, falling back to rendered text.");
+        markdown = await answer.innerText().catch(() => "");
+        await page.evaluate((text) => navigator.clipboard.writeText(text), markdown).catch(() => {});
+    }
+    return markdown;
 }
 
 module.exports = {
@@ -607,5 +703,7 @@ module.exports = {
     composerEmpty,
     composerHasContent,
     transcriptContainsText,
+    findCopyButton,
+    extractAnswerMarkdown,
     waitForAnswer,
 };
