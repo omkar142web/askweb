@@ -105,10 +105,17 @@ FILES
       is delivered as a numbered, multi-part transmission that the AI
       acknowledges part-by-part before answering.
     - Logged-in users can also upload larger payloads as a single attachment.
-    - Anonymous (logged-out) transmission is capped at about 293 KB (~6 parts).
-      Beyond that, log in (askweb --login) or trim the input. Gemini typically
-      requires a login.
-    - Set ASKWEB_CHUNK_SIZE=<chars> to override the automatic part size.
+    - Anonymous (logged-out) transmission is capped at about 293 KB (~6 parts)
+      on ChatGPT. Gemini caps composer input at ~32K chars, so Gemini parts
+      are limited to ~29 KB each and the anonymous 6-part budget holds fewer
+      total characters (~170 KB). Beyond that, log in (askweb --login) or
+      trim the input. Gemini typically requires a login.
+    - Anonymous Gemini bursts may be throttled even under the cap (accepted
+      sends that never generate). Parts are paced ~3s apart; if generation
+      never starts the finale is resent once after a 30s cooldown, then the
+      run fails fast with a rate-limit hint (wait and retry, or log in).
+    - Set ASKWEB_CHUNK_SIZE=<chars> to override the automatic part size
+      (applies to both providers; an explicit override skips the Gemini cap).
 
 LOGIN & BROWSER
   ChatGPT needs no account. It runs anonymously by default; the browser opens

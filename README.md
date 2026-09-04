@@ -301,9 +301,17 @@ For binary uploads, the following strategies are tried in order:
   delivered as a **numbered multi-part transmission** that the AI acknowledges
   part-by-part before answering.
 - Logged-in users can also upload a large payload as a single attachment.
-- Anonymous (logged-out) transmissions are capped at about ~293 KB (~6 parts).
-  Beyond that, log in (`askweb --login`) or trim the input.
-- Set `ASKWEB_CHUNK_SIZE=<chars>` to override the automatic part size.
+- Anonymous (logged-out) transmissions are capped at about ~293 KB (~6 parts)
+  on ChatGPT. Beyond that, log in (`askweb --login`) or trim the input.
+- Gemini caps composer input at ~32K chars (truncates at exactly 32,001), so
+  Gemini parts are limited to ~29 KB each (vs ChatGPT's ~49 KB packing): the
+  same payload needs more parts on Gemini, and the anonymous 6-part budget
+  holds fewer total characters (~170 KB). Anonymous Gemini bursts are also
+  throttled server-side: parts are paced ~3s apart, and if generation never
+  starts the finale is resent once after a 30s cooldown before failing fast
+  with a rate-limit hint (wait a minute and retry, or log in).
+- Set `ASKWEB_CHUNK_SIZE=<chars>` to override the automatic part size (applies
+  to both providers; an explicit override skips the Gemini 29 KB cap).
 
 ## Conversation History
 
@@ -481,9 +489,14 @@ ASKWEB_MAX_CMD_OUTPUT=20000 node index.js --cmd "git log"
 - UI changes by the provider may require selector updates in `chatgpt-ui.js` (ChatGPT) or `providers/gemini/ui.js` (Gemini).
 - Maximum of 50 saved conversations in `.chatgpt-conversations.json`.
 - Anonymous (logged-out) chats are capped at ~293 KB of transmitted content
-  (~6 parts); larger payloads require a login.
+  (~6 parts) on ChatGPT, and ~170 KB (~6 x 29 KB parts) on Gemini due to its
+  composer cap; larger payloads require a login.
 - Gemini typically requires a Google login; anonymous Gemini sessions may be
   refused or capped by Google. ChatGPT works anonymously.
+- Anonymous Gemini bursts may be throttled even under the cap: sends are
+  accepted but never generate a reply. askweb paces parts ~3s apart, resends
+  the finale once after a 30s cooldown if nothing generates within 60s, and
+  aborts after 90s without progress instead of hanging.
 - Unknown `--provider` names exit with an error listing the available providers
   (`chatgpt`, `gemini`).
 
@@ -514,8 +527,14 @@ ASKWEB_MAX_CMD_OUTPUT=20000 node index.js --cmd "git log"
 #   - Re-run or refresh the browser page to retry
 
 # Anonymous chat caps out / large prompt is refused
-#   - Anonymous chats accept about 293 KB across ~6 parts
+#   - Anonymous chats accept about 293 KB across ~6 parts on ChatGPT
+#     (~170 KB on Gemini: ~29 KB parts due to its composer cap)
 #   - Run: node index.js --login  and re-send (uploads as one attachment)
+
+# Gemini rate-limited after rapid anonymous sends
+#   - "did not start generating within 60s" or "stopped responding":
+#     wait a minute and retry (or node index.js --continue),
+#     or log in with: node index.js --login --provider gemini
 
 # Unknown provider
 #   - Run: node index.js --provider xyz  -> lists available providers (chatgpt, gemini)
