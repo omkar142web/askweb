@@ -21,9 +21,11 @@ const GEMINI_URL = "https://gemini.google.com/app";
 const GEMINI_LOGIN_URL = "https://gemini.google.com";
 const CONVERSATION_URL_RE = null;
 
-// Pause between rapid chunked sends so anonymous sessions are not
-// throttled (throttled sends are accepted but never generate a reply).
-const GEMINI_PART_PACING_MS = 3000;
+// Minimum spacing between rapid chunked sends. Sends are already serialized
+// on each part's ack completion (transmitPart awaits generation end), so a
+// typical gap is many seconds and no extra sleep is needed - this floor only
+// kicks in for freak sub-second round-trips, keeping a burst profile tame.
+const MIN_PART_GAP_MS = 1000;
 
 // Measured with a live probe (Sep 2026): Gemini's composer silently
 // truncates pasted input at exactly 32,001 chars, cutting off the part
@@ -217,7 +219,7 @@ async function sendFinaleConfirmed(page, input, text, attempts = 3) {
         // already answering - causing duplicate finale resends. Brief settle
         // to let the bubble render, then proceed; the finale answer itself
         // is awaited by waitForAnswer via the post-finale baseline.
-        await page.waitForTimeout(1500);
+        await page.waitForTimeout(500);
         return true;
     }
     return false;
@@ -298,15 +300,17 @@ async function transmitPart(page, input, part, index, total) {
 
 async function sendChunkedPayload(page, input, plan, finalQuestion) {
     console.log(`>> Starting chunked transmission of ${plan.totalParts} part(s)...`);
+    let lastPartEnd = 0;
     for (let i = 0; i < plan.totalParts; i++) {
-        await transmitPart(page, input, plan.parts[i], i + 1, plan.totalParts);
-        // Breather between bursts: anonymous sessions get throttled (accepted
-        // sends that never generate a reply) when large parts fire
-        // back-to-back. A short pause keeps the burst under the limit.
-        if (i + 1 < plan.totalParts) {
-            console.log(`>> Pacing pause (${GEMINI_PART_PACING_MS / 1000}s) before next part...`);
-            await page.waitForTimeout(GEMINI_PART_PACING_MS);
+        // Adaptive pacing: sleep only the deficit below the minimum gap.
+        // Normal parts take seconds (paste + ack cycle), so this is usually
+        // skipped entirely - unlike the old fixed 3s pause after every part.
+        const gap = Date.now() - lastPartEnd;
+        if (lastPartEnd && gap < MIN_PART_GAP_MS) {
+            await page.waitForTimeout(MIN_PART_GAP_MS - gap);
         }
+        await transmitPart(page, input, plan.parts[i], i + 1, plan.totalParts);
+        lastPartEnd = Date.now();
     }
 
     console.log(">> All parts delivered, sending TRANSMISSION COMPLETE + question...");

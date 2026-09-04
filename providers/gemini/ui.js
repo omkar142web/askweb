@@ -329,9 +329,9 @@ async function clearComposer(page, input) {
     // both contenteditable divs and plain textareas.
     try {
         await input.press(process.platform === "darwin" ? "Meta+a" : "Control+a");
-        await page.waitForTimeout(80);
+        await page.waitForTimeout(50);
         await input.press("Backspace");
-        await page.waitForTimeout(120);
+        await page.waitForTimeout(100);
     } catch { /* fall through to the evaluate fallback below */ }
     if (!(await composerEmpty(page).catch(() => true))) {
         await promptInput(page)
@@ -359,9 +359,9 @@ async function pasteViaClipboardKeys(page, input, text) {
     try {
         await input.click({ timeout: 5000, force: true });
     } catch { /* already focused from typePrompt */ }
-    await page.waitForTimeout(200);
+    await page.waitForTimeout(150);
     await page.keyboard.press(process.platform === "darwin" ? "Meta+a" : "Control+a");
-    await page.waitForTimeout(80);
+    await page.waitForTimeout(50);
     await page.keyboard.press(process.platform === "darwin" ? "Meta+v" : "Control+v");
     for (let check = 0; check < 8; check++) {
         await page.waitForTimeout(400);
@@ -587,13 +587,15 @@ async function transcriptContainsText(page, needle) {
 // copy button.
 const GENERIC_COPY_BUTTON_FALLBACK = 'button[aria-label*="copy" i]:not([aria-label*="code" i]):not([aria-label*="image" i]):not([aria-label*="prompt" i])';
 
-async function findCopyButton(page, answer) {
+async function findCopyButton(page, answer, { includePageScope = true } = {}) {
     const parent = answer.locator("xpath=..");
     // The copy button in Gemini lives inside <model-response> or
     // .response-container, but the answer element (MESSAGE-CONTENT) may
     // be nested deeper. Search answer → parent → model-response ancestor → page.
     const responseAncestor = answer.locator("xpath=ancestor::model-response").first();
-    const scopes = [answer, parent, responseAncestor, page];
+    const scopes = includePageScope
+        ? [answer, parent, responseAncestor, page]
+        : [answer, parent, responseAncestor];
     // Tiers of selectors, most specific first
     const tiers = [
         selector("copyButton"),
@@ -636,8 +638,15 @@ async function extractAnswerMarkdown(page, answer, options = {}) {
 
     const buttonDeadline = Date.now() + buttonPollDeadlineMs;
     let copyButton = null;
+    // Two phases: the answer's own toolbar can mount a beat after its text
+    // settles, and a page-wide search would meanwhile match some older
+    // bubble's button (extracting a stale "OK" instead of the real answer).
+    // So search answer-local scopes first, and only fall back to the whole
+    // page when the local toolbar truly never appears.
+    const localDeadline = Date.now() + Math.min(3000, buttonPollDeadlineMs);
     while (Date.now() < buttonDeadline) {
-        copyButton = await findCopyButton(page, answer);
+        const pageScopeAllowed = Date.now() >= localDeadline;
+        copyButton = await findCopyButton(page, answer, { includePageScope: pageScopeAllowed });
         if (copyButton) break;
         await page.waitForTimeout(pollIntervalMs);
     }

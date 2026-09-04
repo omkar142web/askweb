@@ -224,6 +224,70 @@ function composerDOM() {
             "ack-skip logged the ignored ack",
             skipLogs.some((l) => l.includes("Ignoring per-part ack"))
         );
+
+        // --- Part 9: copy-button scoping (answer-local first, page fallback) ---
+        // Regression: the extractor once grabbed a stale ack's button via the
+        // page-wide fallback because the fresh bubble's toolbar had not
+        // mounted yet, copying "OK" instead of the real answer.
+        await page.setContent(`
+            <div id="chat">
+                <model-response><div class="response-content">STALE-ACK</div><button id="copyStale" aria-label="Copy">Copy</button></model-response>
+                <model-response><div class="response-content">FRESH-ANSWER</div><button id="copyFresh" aria-label="Copy">Copy</button></model-response>
+            </div>
+            <div role="textbox" contenteditable="true" aria-label="Enter a prompt for Gemini" style="display:block;width:400px;height:60px;"></div>
+            <button aria-label="Stop" style="display:none">Stop</button>
+        `);
+        await page.evaluate(() => {
+            document.getElementById("copyStale").addEventListener("click", () => {
+                navigator.clipboard.writeText("STALE-ACK");
+            });
+            document.getElementById("copyFresh").addEventListener("click", () => {
+                navigator.clipboard.writeText("FRESH-ANSWER");
+            });
+        });
+        // NOTE: assistantMessages() matches both `model-response` and the
+        // inner `.response-content`, so nth() indexing on it is unreliable.
+        // Select bubbles via model-response directly (as the app does with
+        // .last()).
+        const freshAnswer = page.locator("model-response").nth(1);
+        const extractedFresh = await withTimeout(
+            ui.extractAnswerMarkdown(page, freshAnswer),
+            20000,
+            "extract-local-button"
+        );
+        check(
+            "extraction prefers the answer-local copy button",
+            typeof extractedFresh === "string" && extractedFresh.includes("FRESH-ANSWER")
+        );
+
+        // Fallback preserved: newest bubble has no toolbar yet AND the older
+        // button lives outside its parent chain, so only the page-wide
+        // phase-2 search (after the local patience window) may claim it.
+        await page.setContent(`
+            <div id="old-chat">
+                <model-response><div class="response-content">STALE-ACK</div><button id="copyStale2" aria-label="Copy">Copy</button></model-response>
+            </div>
+            <div id="chat">
+                <model-response><div class="response-content">FRESH-NO-TOOLBAR-YET</div></model-response>
+            </div>
+            <div role="textbox" contenteditable="true" aria-label="Enter a prompt for Gemini" style="display:block;width:400px;height:60px;"></div>
+            <button aria-label="Stop" style="display:none">Stop</button>
+        `);
+        await page.evaluate(() => {
+            document.getElementById("copyStale2").addEventListener("click", () => {
+                navigator.clipboard.writeText("STALE-ACK");
+            });
+        });
+        const toolbarless = page.locator("model-response").nth(1);
+        const extractedFallback = await withTimeout(
+            ui.extractAnswerMarkdown(page, toolbarless),
+            20000,
+            "extract-page-fallback"
+        );
+        check(
+            "page-scope fallback still works when local toolbar absent",
+            typeof extractedFallback === "string" && extractedFallback.includes("STALE-ACK")
+        );
     } finally {
         await browser.close().catch(() => {});
     }
