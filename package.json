@@ -1,7 +1,7 @@
 {
   "name": "rutkar",
-  "version": "1.1.0",
-  "description": "Automate ChatGPT from the command line using a real Chromium-based browser with Playwright. Send questions, attach files, and save responses as Markdown.",
+  "version": "1.2.0",
+  "description": "Automate AI chat (ChatGPT + Gemini) from the command line using a real Chromium-based browser with Playwright. Send questions, attach files, and save responses as Markdown.",
   "main": "index.js",
   "bin": {
     "askweb": "index.js"
@@ -17,10 +17,12 @@
   },
   "keywords": [
     "chatgpt",
+    "gemini",
     "cli",
     "playwright",
     "browser-automation",
-    "ai"
+    "ai",
+    "ai-chat"
   ],
   "author": "omkar142web",
   "license": "ISC",
@@ -36,8 +38,13 @@
   "files": [
     "index.js",
     "chatgpt-ui.js",
-    "help-template.txt"
+    "help-template.txt",
+    "lib/",
+    "providers/"
   ],
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "dotenv": "^17.4.2",
     "playwright": "^1.62.1",
