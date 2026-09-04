@@ -1,13 +1,15 @@
-ChatGPT CLI
+askweb CLI
 
 DESCRIPTION
-  askweb sends a question to ChatGPT from your terminal and prints the reply.
-  It drives a real, persistent browser session (Playwright), so the browser
-  profile and any login are reused across runs.
+  askweb sends a question to your selected AI provider from your terminal and
+  prints the reply. ChatGPT is the default; Gemini is also available (see AI
+  PROVIDERS). It drives a real, persistent browser session (Playwright), so the
+  browser profile and any login are reused across runs.
 
   Provide a question as text and/or attach files. Text and code files are
   pasted inline; binary files are uploaded when you are logged in. Logging
-  in is optional: askweb runs anonymously by default.
+  in is optional for ChatGPT: askweb runs anonymously by default. Gemini
+  typically requires a Google login.
 
 USAGE
   askweb [options] [question] [files...]
@@ -45,17 +47,24 @@ COMMANDS
   to override). Obvious destructive patterns are blocked.
 
     --dry-run       Build the prompt payload exactly as it would be sent to
-                    ChatGPT (question, inlined files, command results, and any
-                    <file> blocks) and print it to stdout without launching a
-                    browser or sending anything. Useful for previewing how files
-                    and --cmd outputs are assembled before a real run:
+                    the selected AI provider (question, inlined files, command
+                    results, and any <file> blocks) and print it to stdout
+                    without launching a browser or sending anything. Useful for
+                    previewing how files and --cmd outputs are assembled before
+                    a real run:
                       askweb --dry-run "Review this" src/index.js
-                    --dry-run cannot be combined with standalone actions like
-                    --login, --logout, --browser, --prompts, --ai, --ai-order,
-                    --ai-reset, or --clear-*.
-                    --provider overrides the AI website for a single run:
+                    --dry-run cannot be combined with standalone actions:
+                    --login, --logout, --browser, --browser-order,
+                    --browser-reset, --prompts, --prompt-create, --ai,
+                    --ai-order, --ai-reset, or --clear-*.
+
+  --provider <name>  Use a specific AI provider for this run only.
+                    Available providers: chatgpt, gemini.
                       askweb --provider gemini "Explain React"
-                    For a full list of providers, see `askweb --help`.
+                      askweb --provider=chatgpt "Explain React"
+                    When omitted, askweb uses the default from --ai (or ChatGPT
+                    if no preference is saved). Unknown names exit with an
+                    error listing the available providers.
 
 OPTIONS
 {{OPTION_DEFINITIONS}}
@@ -93,26 +102,29 @@ FILES
 
   Large payloads:
     - A single paste is capped at about 25 KB (25000 chars). Anything larger
-      is delivered as a numbered, multi-part transmission that ChatGPT
+      is delivered as a numbered, multi-part transmission that the AI
       acknowledges part-by-part before answering.
     - Logged-in users can also upload larger payloads as a single attachment.
     - Anonymous (logged-out) transmission is capped at about 293 KB (~6 parts).
-      Beyond that, log in (askweb --login) or trim the input.
+      Beyond that, log in (askweb --login) or trim the input. Gemini typically
+      requires a login.
     - Set ASKWEB_CHUNK_SIZE=<chars> to override the automatic part size.
 
 LOGIN & BROWSER
-  askweb needs no account. It runs anonymously by default; the browser opens
+  ChatGPT needs no account. It runs anonymously by default; the browser opens
   and you can start asking right away. Logging in is only required for file
-  uploads and large payloads.
+  uploads and large payloads. Gemini typically requires a Google login.
 
   askweb --login
-      Opens the ChatGPT login page and waits (up to 10 min) for you to sign
-      in. The session cookie is saved in the browser profile and reused by
-      later runs, so you only do this once.
+      Opens the login page for the selected provider and waits (up to 10 min)
+      for you to sign in. The session cookie is saved in the browser profile
+      and reused by later runs, so you only do this once per provider.
+      Combine with --provider to log in to a non-default provider:
+        askweb --login --provider gemini
 
   askweb --logout
-      Opens ChatGPT and waits for you to log out manually; the session
-      cookie is then cleared from the profile.
+      Opens the selected provider's site and waits for you to log out
+      manually; the session cookie is then cleared from the profile.
 
   Browser selection (Chrome, Brave, Edge):
     askweb tries browsers in a saved order (Chrome first by default) and uses
@@ -130,13 +142,16 @@ AI PROVIDERS
   the default; Gemini is also available. Preferences live in .ai-prefs.json
   (in the install directory).
     --provider <name>  Use a specific provider for this run only.
+      Available providers: chatgpt, gemini.
       askweb --provider gemini "Explain React"
+      askweb --provider=chatgpt "Explain React"
     --ai               Choose the default AI provider interactively.
     --ai-order         Reorder the AI provider fallback list interactively.
     --ai-reset         Delete saved AI preferences and return to defaults
                        (ChatGPT first).
     When --provider is omitted, askweb uses the default from --ai (or ChatGPT
-    if no preference is saved).
+    if no preference is saved). Unknown --provider names exit with an error
+    listing the available providers.
 
 PROMPT PRESETS
   Presets are reusable prompts invoked like native flags (--explain, ...).
@@ -163,8 +178,12 @@ CONVERSATIONS
     --continue          Resume the most recent saved conversation.
     --continue <id>     Resume a specific one (full id or unique prefix).
     --new               Start fresh (the default).
-  --continue replays the saved transcript into a NEW ChatGPT chat, so full
-  context carries over. It works even when logged out. After each answer the
+  --continue replays the saved transcript into a NEW chat with the selected
+  provider, so full context carries over. It works even when logged out, and
+  across providers (ids are provider-agnostic). The selected provider is never
+  silently switched: if the saved conversation came from a different provider
+  you get a note, or a warning when --provider explicitly overrides it — pass
+  --provider <original> to stay on the original provider. After each answer the
   updated conversation is saved; the id is printed so you can pass it to
   --continue <id> later.
 

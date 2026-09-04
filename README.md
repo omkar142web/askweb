@@ -1,15 +1,18 @@
 # askweb
 
-Automate ChatGPT from the command line using a real Chromium-based browser with Playwright. Send questions, attach files, and save responses as Markdown.
+Automate AI chat from the command line using a real Chromium-based browser with Playwright. Send questions, attach files, and save responses as Markdown.
 
-askweb controls a persistent browser session, so the same browser profile and (optional) login are reused across runs. Logging in is **optional**: askweb runs anonymously by default and only needs a login for file uploads and very large payloads.
+askweb controls a persistent browser session, so the same browser profile and (optional) login are reused across runs. Logging in is **optional** for ChatGPT: askweb runs anonymously by default and only needs a login for file uploads and very large payloads. Gemini typically requires a Google login.
+
+askweb supports multiple AI providers behind a common interface. ChatGPT is the default; Gemini is also available. Use `--provider <name>` for a one-off override, or `--ai` / `--ai-order` / `--ai-reset` to configure the default and fallback order (stored in `.ai-prefs.json`).
 
 ## Features
 
-- CLI-driven ChatGPT automation with a persistent browser profile
+- CLI-driven AI chat automation with a persistent browser profile
+- Multiple AI providers behind a common interface: ChatGPT (default) and Gemini (`--provider`, `--ai`, `--ai-order`, `--ai-reset`)
 - Question submission with retry logic and UI-state validation
 - File attachment support: text/code files pasted inline, binary files uploaded (when logged in)
-- **Local commands** (`--cmd`) — run a shell command and pipe its output into the prompt sent to ChatGPT
+- **Local commands** (`--cmd`) — run a shell command and pipe its output into the prompt sent to the AI
 - **Dry runs** (`--dry-run`) — preview the exact prompt payload that would be sent, without launching a browser
 - Prompt presets as native flags (`--explain`, `--find-error`, ...), with a built-in and a custom (editable) set
 - Append/prepend answer output to an existing file (`--append` / `--prepend`)
@@ -20,6 +23,7 @@ askweb controls a persistent browser session, so the same browser profile and (o
 - Conversation history with `--continue [id]` and `--new`
 - Large payloads delivered as numbered multi-part transmissions or a single attachment
 - Browser preference persistence (`.browser-prefs.json`)
+- AI provider preference persistence (`.ai-prefs.json`)
 - Conversation history persistence (`.chatgpt-conversations.json`, max 50 entries)
 - Graceful shutdown on SIGINT/SIGTERM
 
@@ -28,6 +32,7 @@ askweb controls a persistent browser session, so the same browser profile and (o
 - **Runtime:** Node.js (CommonJS)
 - **Browser automation:** Playwright (`playwright-extra`)
 - **Stealth:** `puppeteer-extra-plugin-stealth`
+- **AI providers:** pluggable registry in `providers/` (`chatgpt`, `gemini`) with shared payload logic in `lib/payload.js`
 - **Config:** `dotenv`
 
 ## Installation
@@ -114,6 +119,12 @@ node index.js --continue a2cc6a02 "More on this"
 # Start a fresh conversation
 node index.js --new "New topic"
 
+# Use a specific AI provider for one run
+node index.js --provider gemini "Explain React"
+
+# Choose the default AI provider interactively
+node index.js --ai
+
 # Question text that starts with a dash
 node index.js -- " -explain this flag"
 
@@ -141,14 +152,14 @@ A new user can run `node index.js --help` for the full in-tool mini-manual.
 
 | Option | Argument | Description |
 | --- | --- | --- |
-| `askweb [options] [question] [files...]` | — | Ask ChatGPT a question, optionally attaching files. |
+| `askweb [options] [question] [files...]` | — | Ask the selected AI a question, optionally attaching files. |
 | `<question>` | — | Free-form question text (default: `"What is JavaScript?"`). |
 | `<file>` / `@file` | path | Attach a file. A bare path is used only if it exists; `@path` always forces a file. |
 | `-o`, `--output` | `<file>` | Save the answer to a file (default: `./output.md`). Also accepts `--output=<file>`. |
 | `--append` | — | Append the answer to an existing output file. Requires `--output`. |
 | `--prepend` | — | Prepend the answer to an existing output file. Requires `--output`. |
-| `--login` | — | Open ChatGPT to log in and save the session. Standalone (ignores question/files/`--continue`/`--new`). |
-| `--logout` | — | Open ChatGPT to log out manually; the session cookie is cleared. Standalone (up to 10 min). |
+| `--login` | — | Open the selected AI site to log in and save the session. Standalone (ignores question/files/`--continue`/`--new`). |
+| `--logout` | — | Open the selected AI site to log out manually; the session cookie is cleared. Standalone (up to 10 min). |
 | `--continue` | `[id]` | Resume the most recent conversation, or a specific one by id prefix. |
 | `--new` | — | Start a fresh conversation (the default). Cannot be used with `--continue`. |
 | `--prompts` | — | Open the interactive Prompt Manager. |
@@ -157,12 +168,16 @@ A new user can run `node index.js --help` for the full in-tool mini-manual.
 | `--browser` | — | Choose the default browser interactively. |
 | `--browser-order` | — | Reorder the browser fallback list interactively. |
 | `--browser-reset` | — | Reset browser preferences to automatic (Chrome first). |
+| `--provider` | `<name>` | Use a specific AI provider for this run only (e.g. `chatgpt`, `gemini`). Overrides the default from `--ai`. Also accepts `--provider=<name>`. |
+| `--ai` | — | Choose the default AI provider interactively. |
+| `--ai-order` | — | Reorder the AI provider fallback list interactively. |
+| `--ai-reset` | — | Delete saved AI preferences and return to defaults (ChatGPT first). |
 | `--clear-session` | — | Wipe local/session storage before launching (starts logged out). |
 | `--clear-conversations` | — | Delete all saved conversation history. |
 | `--clear-conversation` | `<id>` | Delete one saved conversation by id (prefix match). Also accepts `--clear-conversation=<id>`. |
 | `-h`, `--help` | — | Show help. |
 | `-v`, `--version` | — | Show the version. |
-| `--dry-run` | — | Print the exact prompt payload that would be sent to ChatGPT, then exit. No browser is launched and nothing is sent. |
+| `--dry-run` | — | Print the exact prompt payload that would be sent to the selected AI provider, then exit. No browser is launched and nothing is sent. |
 | `--cmd` | `<command>` | Execute a local shell command and include its stdout/stderr in the prompt. Can be repeated. Each command runs with a 30s timeout, capped at `ASKWEB_MAX_CMD_OUTPUT` chars per stream. |
 | `--` | — | Stop option parsing; tokens after it are the question/files literally. |
 
@@ -174,13 +189,14 @@ A new user can run `node index.js --help` for the full in-tool mini-manual.
 - `--output` and `--clear-conversation` each require their argument.
 - `--continue=<id>` is not supported; use a space: `--continue <id>`.
 - `--dry-run` cannot be combined with standalone actions (`--login`, `--logout`,
-  `--browser`, `--browser-order`, `--browser-reset`, `--prompts`,
-  `--prompt-create`, `--clear-conversations`, `--clear-conversation`).
+  `--browser`, `--browser-order`, `--browser-reset`, `--ai`, `--ai-order`,
+  `--ai-reset`, `--prompts`, `--prompt-create`, `--clear-conversations`,
+  `--clear-conversation`).
 
 ## Local Commands (`--cmd`)
 
 `--cmd` runs a local shell command and folds its stdout/stderr into the prompt
-sent to ChatGPT as a `<command name="...">` block. Combine with a question to
+sent to the AI as a `<command name="...">` block. Combine with a question to
 ask about the command's output. The flag can be repeated for multiple commands.
 
 ```bash
@@ -198,7 +214,9 @@ node index.js --cmd "git log -5" "Summarize the recent changes."
 
 `--dry-run` builds the prompt payload exactly as it would be sent (question,
 attached/inlined files, command results, and any `<file>` blocks) and prints it
-to stdout, then exits. No browser is launched and nothing is sent to ChatGPT.
+to stdout, then exits. No browser is launched and nothing is sent to the AI
+provider. The header names the selected provider
+(`--- DRY RUN: PROMPT THAT WOULD BE SENT TO <PROVIDER> ---`).
 This is useful for inspecting how files and `--cmd` outputs are assembled
 before committing tokens to a real run.
 
@@ -280,7 +298,7 @@ For binary uploads, the following strategies are tried in order:
 ### Large Payloads
 
 - A single paste is capped at about 25 KB (25,000 chars). Anything larger is
-  delivered as a **numbered multi-part transmission** that ChatGPT acknowledges
+  delivered as a **numbered multi-part transmission** that the AI acknowledges
   part-by-part before answering.
 - Logged-in users can also upload a large payload as a single attachment.
 - Anonymous (logged-out) transmissions are capped at about ~293 KB (~6 parts).
@@ -293,7 +311,8 @@ Conversation history is saved to `.chatgpt-conversations.json` in the askweb
 install directory. Up to 50 conversations are retained.
 
 Each entry stores:
-- `id` (from the ChatGPT URL UUID, or generated)
+- `id` (from the ChatGPT URL UUID, a Gemini URL token, or generated)
+- `provider` (e.g. `"chatgpt"`, `"gemini"`; defaults to `"chatgpt"` for old entries)
 - `url`
 - `title`
 - `updatedAt`
@@ -301,6 +320,13 @@ Each entry stores:
   `mode`: `"chunked"` (anonymous multi-part) or `"attachment"` (uploaded as
   a single file), plus `parts`/`chars` (chunked) or `chars` (attachment)
 - `messages[]`
+
+Conversation ids are provider-agnostic: `--continue` replays the saved
+transcript as plain text into a new chat with the currently selected provider,
+so it works across providers and even when logged out. The selected provider
+is never silently switched — if the saved conversation came from a different
+provider you get a note (or a warning when `--provider` explicitly overrides
+it) with a hint to pass `--provider <original>` to stay on the original one.
 
 Use `--continue` to replay the most recent conversation's full transcript into a
 fresh chat. Use `--continue <id>` (full id or a unique prefix) for a specific
@@ -332,17 +358,21 @@ for reliable extraction.
 
 ## Login & Browser
 
-askweb needs no account. It runs anonymously by default; the browser opens and
+ChatGPT needs no account. It runs anonymously by default; the browser opens and
 you can start asking right away. Logging in is only required for file uploads
-and large payloads.
+and large payloads. Gemini typically requires a Google login — run
+`askweb --login` (or `askweb --login --provider gemini`) and sign in inside the
+opened window.
 
 ```bash
 node index.js --login    # open the login page; session cookie is saved in the profile
-node index.js --logout   # open ChatGPT and log out manually; cookie is cleared
+node index.js --logout   # open the AI site and log out manually; cookie is cleared
 ```
 
+`--login` / `--logout` act on the currently selected provider
+(`--provider <name>` overrides for that run, otherwise the default from `--ai`).
 The session cookie is saved in the browser profile and reused by later runs, so
-you only log in once.
+you only log in once per provider.
 
 ### Browser Selection
 
@@ -376,9 +406,28 @@ browser starts logged out/anonymous:
 node index.js --clear-session "Who won the 2024 election?"
 ```
 
+## AI Providers
+
+askweb supports multiple AI providers behind a common interface. ChatGPT is
+the default; Gemini is also available.
+
+```bash
+node index.js --provider gemini "Explain React"  # one-off override for this run
+node index.js --ai          # choose the default AI provider interactively
+node index.js --ai-order    # reorder the AI provider fallback list
+node index.js --ai-reset    # delete saved AI preferences (back to ChatGPT first)
+```
+
+When `--provider` is omitted, askweb uses the default from `--ai` (or ChatGPT
+if no preference is saved). Unknown `--provider` names error out with the list
+of available providers. `--provider` also accepts `--provider=<name>`.
+`--continue` keeps your selected provider (see Conversation History) — pass
+`--provider <original>` explicitly if you want to stay on the conversation's
+original provider.
+
 ## Configuration
 
-Preferences are stored in `.browser-prefs.json` in the askweb install directory:
+Browser preferences are stored in `.browser-prefs.json` in the askweb install directory:
 
 ```json
 {
@@ -389,6 +438,22 @@ Preferences are stored in `.browser-prefs.json` in the askweb install directory:
 
 The configured preferred browser is tried first, followed by the saved order,
 then any remaining defaults.
+
+AI provider preferences are stored separately in `.ai-prefs.json` in the askweb
+install directory:
+
+```json
+{
+  "defaultAI": "chatgpt",
+  "aiOrder": ["chatgpt", "gemini"]
+}
+```
+
+The configured default AI is tried first, followed by the saved order, then any
+remaining registered providers. Unknown names left in the file by removed
+providers are silently ignored. Deleting the file (via `--ai-reset`) returns to
+automatic selection (ChatGPT first). Browser (`.browser-prefs.json`) and AI
+(`.ai-prefs.json`) preferences are fully independent.
 
 ## Environment
 
@@ -413,10 +478,14 @@ ASKWEB_MAX_CMD_OUTPUT=20000 node index.js --cmd "git log"
   - `executablePath: ${process.env.LOCALAPPDATA}\\BraveSoftware\\Brave-Browser\\Application\\brave.exe`
   - On macOS/Linux, `LOCALAPPDATA` is undefined and Brave may be skipped silently.
 - If the provider's copy button is unavailable, the tool polls rapidly for up to 10 seconds before reporting an error. Re-run or refresh the page to retry.
-- Some ChatGPT UI changes may require selector updates in `chatgpt-ui.js`.
+- UI changes by the provider may require selector updates in `chatgpt-ui.js` (ChatGPT) or `providers/gemini/ui.js` (Gemini).
 - Maximum of 50 saved conversations in `.chatgpt-conversations.json`.
 - Anonymous (logged-out) chats are capped at ~293 KB of transmitted content
   (~6 parts); larger payloads require a login.
+- Gemini typically requires a Google login; anonymous Gemini sessions may be
+  refused or capped by Google. ChatGPT works anonymously.
+- Unknown `--provider` names exit with an error listing the available providers
+  (`chatgpt`, `gemini`).
 
 ## Troubleshooting
 
@@ -433,8 +502,12 @@ ASKWEB_MAX_CMD_OUTPUT=20000 node index.js --cmd "git log"
 #   - Log in manually within 10 minutes
 
 # Waiting for login message keeps repeating
-#   - The active browser profile has no ChatGPT session
+#   - The active browser profile has no session for the selected provider
 #   - Log in inside the opened window, or run: node index.js --clear-session --login
+
+# Gemini prompt never becomes ready / asks to sign in
+#   - Gemini typically requires a Google login
+#   - Run: node index.js --login --provider gemini (or set it as default via --ai)
 
 # Answer contains no Markdown formatting
 #   - The copy button was not found within the polling window
@@ -443,6 +516,10 @@ ASKWEB_MAX_CMD_OUTPUT=20000 node index.js --cmd "git log"
 # Anonymous chat caps out / large prompt is refused
 #   - Anonymous chats accept about 293 KB across ~6 parts
 #   - Run: node index.js --login  and re-send (uploads as one attachment)
+
+# Unknown provider
+#   - Run: node index.js --provider xyz  -> lists available providers (chatgpt, gemini)
+#   - Pick one with --provider <name>, or set the default with --ai
 
 # Conversation history not saving
 #   - Ensure the project directory is writable
