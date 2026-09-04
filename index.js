@@ -3298,7 +3298,14 @@ async function main() {
             typeof sendResult === "object" && sendResult !== null ? sendResult.count : sendResult;
         const answerOptions =
             typeof sendResult === "object" && sendResult !== null
-                ? { baseline: { count: sendResult.count, text: sendResult.text }, chunked: true }
+                ? {
+                      baseline: { count: sendResult.count, text: sendResult.text },
+                      chunked: true,
+                      // Gemini chunked path returns the finale text so its
+                      // waitForAnswer can resend once if generation stalls.
+                      // (ChatGPT's result has no finale field - unchanged.)
+                      ...(sendResult.finale ? { finale: sendResult.finale } : {}),
+                  }
                 : undefined;
         console.log(">> Prompt sent, waiting for response...");
         const reply = await provider.waitForAnswer(page, assistantCountBefore, answerOptions);

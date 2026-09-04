@@ -8,7 +8,8 @@ const {
     buildFullPrompt,
     buildTextPayload,
     stageTempPayload,
-    buildDeliveryPlan,
+    buildCappedTransmissionPlan,
+    resolveChunkSizeOverride,
     buildTransmissionFinale,
     SINGLE_PASTE_MAX,
     ANON_MAX_PARTS,
@@ -19,6 +20,31 @@ const {
 const GEMINI_URL = "https://gemini.google.com/app";
 const GEMINI_LOGIN_URL = "https://gemini.google.com";
 const CONVERSATION_URL_RE = null;
+
+// Pause between rapid chunked sends so anonymous sessions are not
+// throttled (throttled sends are accepted but never generate a reply).
+const GEMINI_PART_PACING_MS = 3000;
+
+// Measured with a live probe (Sep 2026): Gemini's composer silently
+// truncates pasted input at exactly 32,001 chars, cutting off the part
+// close tag, so composer verification can never pass for larger parts.
+// Cap chunk bodies (tags/header take only ~hundreds of chars on top) well
+// under that ceiling. ChatGPT's textarea has no such cap, so this limit
+// applies to the Gemini provider only.
+const GEMINI_MAX_PART_CHARS = 29000;
+
+function buildGeminiDeliveryPlan(payload) {
+    const manualChunkSize = resolveChunkSizeOverride();
+    if (manualChunkSize) {
+        console.log(`>> Using manual chunk size override: ${manualChunkSize} chars (${(manualChunkSize / 1024).toFixed(1)} KB).`);
+    } else {
+        console.log(`>> Gemini composer cap: chunk bodies limited to ${GEMINI_MAX_PART_CHARS} chars.`);
+    }
+    return {
+        plan: buildCappedTransmissionPlan(payload, GEMINI_MAX_PART_CHARS, manualChunkSize),
+        manualChunkSize,
+    };
+}
 
 const GOOGLE_AUTH_COOKIE_NAMES = [
     "SID",
@@ -132,10 +158,8 @@ function composerHasContent(page, needle, minLength) {
 
 function looksLikeUsageLimit(page) {
     return page
-        .evaluate(() => {
-            const text = document.body ? document.body.innerText : "";
-            return /\b(limit|upgrade|premium)\b/i.test(text);
-        })
+        .evaluate(() => (document.body ? document.body.innerText : ""))
+        .then((text) => ui.isUsageLimitText(text || ""))
         .catch(() => false);
 }
 
@@ -170,17 +194,31 @@ async function sendFinaleConfirmed(page, input, text, attempts = 3) {
         }
 
         await page.waitForTimeout(500);
+        const userCountBefore = await ui.userMessages(page).count().catch(() => 0);
         await ui.trySend(page, ui.sendButton(page));
 
-        const deadline = Date.now() + 30000;
-        while (Date.now() < deadline) {
-            if (await ui.transcriptContainsText(page, text)) return true;
-            if (await ui.transcriptContainsText(page, marker)) return true;
-            await page.waitForTimeout(600);
+        // Confirm the click was actually accepted (user bubble +1, composer
+        // cleared, or generation started). Clicking while a reply is still
+        // generating is a no-op that leaves the composer full - without this
+        // check we would burn the whole landing timeout on an unsent finale
+        // and then mistake a stale per-part ack for the finale answer.
+        const accepted = await ui.waitForSendAccepted(page, userCountBefore, 8000);
+        if (!accepted) {
+            console.log(`>> Finale send not accepted (attempt ${attempt}/${attempts}), retrying...`);
+            await ui.dismissAndSettle(page, 500);
+            continue;
         }
 
-        console.log(">> TRANSMISSION COMPLETE not confirmed " + `(attempt ${attempt}/${attempts}).`);
-        if (attempt < attempts) await waitForGenerationEnd(page);
+        // Send accepted (new user bubble / cleared composer / generation
+        // started). That IS the delivery confirmation: unlike ChatGPT,
+        // Gemini collapses user bubbles in the transcript ("You said ..."),
+        // so the finale text is not reliably searchable in the DOM and a
+        // transcript-text poll could never confirm even while Gemini was
+        // already answering - causing duplicate finale resends. Brief settle
+        // to let the bubble render, then proceed; the finale answer itself
+        // is awaited by waitForAnswer via the post-finale baseline.
+        await page.waitForTimeout(1500);
+        return true;
     }
     return false;
 }
@@ -212,9 +250,23 @@ async function transmitPart(page, input, part, index, total) {
             await waitForGenerationEnd(page);
         }
 
+        const userBefore = await ui.userMessages(page).count().catch(() => 0);
         await ui.trySend(page, ui.sendButton(page));
 
-        const landing = await waitForPartLanding(page, closeTag);
+        // Gemini collapses long user bubbles in the transcript ("You said
+        // [TRANSMISSION HEADER] ... [PAYL..."), so the part close tag is not
+        // searchable in the DOM and the close-tag landing poll below can
+        // never confirm. Send-acceptance (new user bubble / cleared composer
+        // / generation started) is the reliable landing signal instead -
+        // then await the per-part "OK" ack before returning.
+        const accepted = await ui.waitForSendAccepted(page, userBefore, 10000);
+        if (accepted) {
+            console.log(" accepted.");
+            await waitForGenerationEnd(page);
+            return true;
+        }
+
+        const landing = await waitForPartLanding(page, closeTag, 15000);
         if (landing.ok) {
             console.log(" landed.");
             await waitForGenerationEnd(page);
@@ -248,18 +300,39 @@ async function sendChunkedPayload(page, input, plan, finalQuestion) {
     console.log(`>> Starting chunked transmission of ${plan.totalParts} part(s)...`);
     for (let i = 0; i < plan.totalParts; i++) {
         await transmitPart(page, input, plan.parts[i], i + 1, plan.totalParts);
+        // Breather between bursts: anonymous sessions get throttled (accepted
+        // sends that never generate a reply) when large parts fire
+        // back-to-back. A short pause keeps the burst under the limit.
+        if (i + 1 < plan.totalParts) {
+            console.log(`>> Pacing pause (${GEMINI_PART_PACING_MS / 1000}s) before next part...`);
+            await page.waitForTimeout(GEMINI_PART_PACING_MS);
+        }
     }
 
     console.log(">> All parts delivered, sending TRANSMISSION COMPLETE + question...");
-    const baseline = await ui.assistantMessages(page).count().catch(() => 0);
-    const sent = await sendFinaleConfirmed(page, input, buildTransmissionFinale(plan.totalParts, finalQuestion));
+    const preFinaleCount = await ui.assistantMessages(page).count().catch(() => 0);
+    const finale = buildTransmissionFinale(plan.totalParts, finalQuestion);
+    const sent = await sendFinaleConfirmed(page, input, finale);
     if (!sent) {
         throw new Error(
             "TRANSMISSION COMPLETE could not be delivered after retries - the session likely stopped accepting messages. Check the browser window."
         );
     }
     console.log(">> TRANSMISSION COMPLETE confirmed.");
-    return baseline;
+    // Snapshot immediately after acceptance - deliberately NO settle wait:
+    // a fast finale answer may already be streaming, and waiting it out here
+    // would absorb the real answer into the baseline (observed live with a
+    // one-word answer completing inside the old settle window). Late
+    // per-part acks are filtered by content in waitForAnswer instead
+    // (looksLikePartAck), and the finale answer self-corrects via the
+    // stabilization phase even if first seen partial.
+    const settled = ui.assistantMessages(page);
+    const postCount = await settled.count().catch(() => 0);
+    const postText = postCount > 0 ? (await settled.last().innerText().catch(() => "")).trim() : "";
+    console.log(`>> Post-finale baseline: ${postCount} replies (was ${preFinaleCount} before finale).`);
+    // Include the finale text so waitForAnswer can resend it once if the
+    // send was accepted but generation never starts (anonymous throttle).
+    return { count: postCount, text: postText, finale };
 }
 
 async function looksLoggedOut(page) {
@@ -389,7 +462,7 @@ async function sendQuestion(page, question, targetUrl, context) {
             }
         }
         if (!stagedAttachmentName) {
-            const { plan, manualChunkSize } = buildDeliveryPlan(payload);
+            const { plan, manualChunkSize } = buildGeminiDeliveryPlan(payload);
             deliveryPlan = plan;
             if (!loggedInFinal && deliveryPlan.totalParts > ANON_MAX_PARTS) {
                 const maxKB = Math.round((ANON_MAX_PARTS * (ANON_PART_SIZE_CEILING - PART_TAG_OVERHEAD)) / 1024);
@@ -410,7 +483,7 @@ async function sendQuestion(page, question, targetUrl, context) {
     if (deliveryPlan) {
         const finalQuestion = question.text || "";
         const baseline = await sendChunkedPayload(page, finalInput, deliveryPlan, finalQuestion);
-        console.log(`>> Chunked transmission complete (baseline: ${baseline} replies).`);
+        console.log(`>> Chunked transmission complete (baseline: ${baseline.count} replies).`);
         return baseline;
     }
 
@@ -578,8 +651,14 @@ const provider = {
     waitForAnswer: (page, countBefore, options) => ui.waitForAnswer(page, countBefore, options),
 
     getConversationId: async (page) => {
-        const urlMatch = page.url().match(/\/gemini\/s\/[^/?#]+/i);
-        if (urlMatch) return urlMatch[0].split("/").pop();
+        // The SPA updates the URL a moment after the answer completes, so
+        // poll briefly like the ChatGPT provider does before falling back.
+        const deadline = Date.now() + 2000;
+        while (Date.now() < deadline) {
+            const id = ui.extractConversationId(page.url());
+            if (id) return id;
+            await page.waitForTimeout(250);
+        }
         return crypto.randomUUID();
     },
 

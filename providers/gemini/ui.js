@@ -323,14 +323,95 @@ async function attachFiles(page, files) {
     }
 }
 
+async function clearComposer(page, input) {
+    // input.fill("") hangs on contenteditable rich-text composers (Gemini's
+    // .ql-editor div), so clear with select-all + delete, which works for
+    // both contenteditable divs and plain textareas.
+    try {
+        await input.press(process.platform === "darwin" ? "Meta+a" : "Control+a");
+        await page.waitForTimeout(80);
+        await input.press("Backspace");
+        await page.waitForTimeout(120);
+    } catch { /* fall through to the evaluate fallback below */ }
+    if (!(await composerEmpty(page).catch(() => true))) {
+        await promptInput(page)
+            .evaluate((el) => {
+                if ("value" in el) el.value = "";
+                else el.innerHTML = "";
+                el.dispatchEvent(new InputEvent("input", { bubbles: true }));
+            })
+            .catch(() => {});
+    }
+}
+
+async function composerTextLength(page) {
+    return promptInput(page)
+        .evaluate((el) => ("value" in el ? el.value || "" : el.innerText || el.textContent || "").length)
+        .catch(() => 0);
+}
+
+async function pasteViaClipboardKeys(page, input, text) {
+    const copied = await page
+        .evaluate((t) => navigator.clipboard.writeText(t), text)
+        .then(() => true)
+        .catch(() => false);
+    if (!copied) return false;
+    try {
+        await input.click({ timeout: 5000, force: true });
+    } catch { /* already focused from typePrompt */ }
+    await page.waitForTimeout(200);
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+a" : "Control+a");
+    await page.waitForTimeout(80);
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+v" : "Control+v");
+    for (let check = 0; check < 8; check++) {
+        await page.waitForTimeout(400);
+        if ((await composerTextLength(page)) >= text.length * 0.7) return true;
+    }
+    return false;
+}
+
+async function pasteViaInsertText(page, text) {
+    // Slice feed so a single huge insertion doesn't block the page; 2000
+    // chars per slice with surrogate-pair-safe boundaries.
+    let offset = 0;
+    while (offset < text.length) {
+        let end = Math.min(offset + 2000, text.length);
+        const lastCode = text.charCodeAt(end - 1);
+        if (lastCode >= 0xd800 && lastCode <= 0xdbff && end < text.length) end += 1;
+        try {
+            await page.keyboard.insertText(text.slice(offset, end));
+        } catch {
+            return false;
+        }
+        offset = end;
+        await page.waitForTimeout(30);
+    }
+    return true;
+}
+
 async function typePrompt(page, input, text) {
     await dismissBlockingUI(page);
-    await input.click({ timeout: 10000, force: true });
-    await input.fill("");
+    try {
+        await input.click({ timeout: 10000, force: true });
+    } catch { /* visibility is verified via the paste check below */ }
+    await clearComposer(page, input);
 
     if (text) {
-        await input.fill(text);
-        await page.waitForTimeout(400);
+        // Strategy 1: clipboard paste (fastest for 40+ KB parts). Never use
+        // input.fill() here - it hangs on Gemini's contenteditable composer.
+        let pasted = await pasteViaClipboardKeys(page, input, text);
+        // Strategy 2: typed insertion in slices (covers contexts where the
+        // async clipboard API is unavailable or denied).
+        if (!pasted) {
+            console.log(`>> Clipboard paste unavailable, typing ${(text.length / 1024).toFixed(1)} KB in slices...`);
+            await clearComposer(page, input);
+            pasted = await pasteViaInsertText(page, text);
+        }
+        if (pasted) {
+            console.log(`>> Pasted ${(text.length / 1024).toFixed(1)} KB into Gemini composer.`);
+        } else {
+            console.log(`>> WARNING: Gemini composer paste could not be verified (${(text.length / 1024).toFixed(1)} KB).`);
+        }
     }
 
     await page.waitForTimeout(400);
@@ -469,6 +550,22 @@ async function composerHasContent(page, needle, minLength) {
         .catch(() => false);
 }
 
+// Pure: does page text indicate a real usage/rate limit? NOTE: a bare
+// "Premium"/"Upgrade" match is NOT enough - the Gemini sidebar permanently
+// advertises premium plans, which used to cause bogus mid-transmission
+// aborts. Require limit-context phrasing.
+function isUsageLimitText(text) {
+    if (!text) return false;
+    return (
+        /usage\s+(limit|cap)\b/i.test(text) ||
+        /rate\s+limit/i.test(text) ||
+        /too many requests/i.test(text) ||
+        /\bquota\b/i.test(text) ||
+        /try again (later|in \d+)/i.test(text) ||
+        /something went wrong/i.test(text)
+    );
+}
+
 async function transcriptContainsText(page, needle) {
     return page
         .evaluate(
@@ -586,15 +683,78 @@ async function extractAnswerMarkdown(page, answer, options = {}) {
     return typeof text === "string" && text.trim() ? text : null;
 }
 
+// Pure: pull the conversation id out of a Gemini URL. Anonymous chats live
+// at /app/<hex-id> (observed live: /app/4d463cb902594888); a bare /app or
+// any other layout yields null and the caller falls back to a generated id.
+function extractConversationId(url) {
+    const m = (url || "").match(/\/app\/([a-f0-9]{8,64})/i);
+    return m ? m[1] : null;
+}
+
+// Pure: does this bubble look like a per-part transmission ack rather than a
+// real answer? The transmission header instructs the model to reply with ONLY
+// "OK" per part (observed variants: "OK", "Got part N/M..."), so acks match a
+// narrow shape. Used to skip late acks that would otherwise be extracted as
+// the finale answer. Conservative on purpose: anything longer or off-pattern
+// is treated as a genuine answer.
+function looksLikePartAck(text) {
+    const t = (text || "").trim();
+    if (!t) return false;
+    if (/^(ok|okay|got it|received|noted|acknowledged)[.!]?$/i.test(t)) return true;
+    if (t.length <= 200 && /got\s+part\s+\d+\s*\/\s*\d+/i.test(t)) return true;
+    if (t.length <= 200 && /part\s+\d+\s*\/\s*\d+\s*(received|ok|complete|done)/i.test(t)) return true;
+    return false;
+}
+
+// Pure predicate: is the currently-visible last assistant bubble a genuinely
+// new answer relative to a post-finale baseline snapshot? Mirrors the ChatGPT
+// path in index.js (isFreshAssistantAnswer): after a chunked transmission a
+// late per-part ack can land after the pre-finale count snapshot, so `count >
+// countBefore` alone fires on the stale ack. Kept pure (no page access) so it
+// is unit-testable.
+function isFreshAssistantAnswer(seen, baseline) {
+    if (!seen || !baseline) return false;
+    if (typeof seen.count !== "number" || typeof baseline.count !== "number") return false;
+    if (seen.count <= baseline.count) return false;
+    if (!seen.text) return false;
+    if (seen.text === baseline.text) return false;
+    if (baseline.previousText && seen.text === baseline.previousText) return false;
+    return true;
+}
+
 async function waitForAnswer(page, assistantCountBefore = 0, options = {}) {
     console.log(">> Waiting for answer to appear...");
     const replies = assistantMessages(page);
     const previousLastText = (await replies.last().innerText().catch(() => "")).trim();
+    // Give up early (instead of the full 3-minute deadline) when generation
+    // never even starts: an accepted send with no reply within this window
+    // means the prompt was throttled/dropped, and polling longer cannot help.
+    // With options.finale (chunked path) we resend once after a cooldown
+    // first, since burst throttles are often time-based.
+    const { noGenerationTimeoutMs = 60000, finale: finaleText = null } = options;
+    let waitStart = Date.now();
+    let retriedFinale = false;
+    // Chunked path only: post-finale snapshot taken after the finale send was
+    // accepted and late per-part acks settled (see sendChunkedPayload in
+    // providers/gemini/index.js).
+    const answerBaseline =
+        options && options.baseline && typeof options.baseline.count === "number"
+            ? { count: options.baseline.count, text: options.baseline.text || "", previousText: previousLastText }
+            : null;
+    if (answerBaseline) {
+        console.log(`>> Waiting for a new answer after the finale (baseline: ${answerBaseline.count} replies).`);
+    }
 
     const deadline = Date.now() + 3 * 60 * 1000;
     let sawGeneration = false;
     let ready = false;
     let lastProgressLog = 0;
+    // Stall clock: any count/text change resets it. If only acks arrive and
+    // the finale is never answered, fail honestly instead of hanging.
+    const STALL_TIMEOUT_MS = 90000;
+    let lastCount = await replies.count().catch(() => 0);
+    let lastSeenText = previousLastText;
+    let lastProgressAt = Date.now();
 
     while (Date.now() < deadline) {
         const stopVisible = await isStopVisible(page);
@@ -606,12 +766,69 @@ async function waitForAnswer(page, assistantCountBefore = 0, options = {}) {
         const count = await replies.count().catch(() => 0);
         const grew = count > assistantCountBefore;
         const newText = count > 0 ? (await replies.last().innerText().catch(() => "")).trim() : "";
+        if (count !== lastCount || newText !== lastSeenText) {
+            lastProgressAt = Date.now();
+            lastCount = count;
+            lastSeenText = newText;
+        }
 
-        if (grew || ((sawGeneration || (await composerEmpty(page))) && !stopVisible && newText && newText !== previousLastText)) {
+        const grewFresh =
+            grew && answerBaseline ? isFreshAssistantAnswer({ count, text: newText }, answerBaseline) : grew;
+        const fallbackFire =
+            (sawGeneration || (await composerEmpty(page))) && !stopVisible && newText && newText !== previousLastText;
+        const candidate = grewFresh || fallbackFire;
+
+        if (candidate && answerBaseline && looksLikePartAck(newText)) {
+            // A late per-part ack, not the finale answer: absorb it into the
+            // baseline and keep waiting instead of extracting "OK" as final.
+            console.log(`>> Ignoring per-part ack (replies: ${count}, ${newText.length} chars), still waiting for the finale answer...`);
+            answerBaseline.count = count;
+            answerBaseline.text = newText;
+            answerBaseline.previousText = newText;
+            assistantCountBefore = count;
+            await page.waitForTimeout(700);
+            continue;
+        }
+
+        if (candidate) {
             ready = true;
             const elapsed = ((Date.now() - (deadline - 3 * 60 * 1000)) / 1000).toFixed(1);
             console.log(`>> Answer appeared after ${elapsed}s (replies: ${count}, text length: ${newText.length}).`);
             break;
+        }
+
+        // The prompt was sent but Gemini never started generating (no stop
+        // button, no new bubble, no text change). Observed after rapid
+        // anonymous bursts: the send is accepted yet throttled server-side.
+        // Resend the finale once after a cooldown - if the throttle was
+        // time-based, the resend generates. Otherwise fail fast with
+        // guidance instead of hanging until the deadline.
+        if (!sawGeneration && Date.now() - waitStart > noGenerationTimeoutMs) {
+            if (finaleText && !retriedFinale) {
+                retriedFinale = true;
+                console.log(">> No generation started - cooling down 30s, then resending the finale once...");
+                await page.waitForTimeout(30000);
+                await typePrompt(page, promptInput(page), finaleText);
+                const userBefore = await userMessages(page).count().catch(() => 0);
+                await trySend(page, sendButton(page));
+                const resent = await waitForSendAccepted(page, userBefore, 10000);
+                console.log(resent ? ">> Finale resent, waiting for generation..." : ">> Finale resend not accepted, continuing to wait...");
+                waitStart = Date.now();
+                continue;
+            }
+            throw new Error(
+                "Gemini did not start generating within 60s of the sent prompt - the anonymous session was likely rate-limited after rapid sends. " +
+                    "Wait a minute and retry (or `node index.js --continue`), or log in with `node index.js --login --provider gemini` to lift the limit."
+            );
+        }
+
+        // Stall: only acks (or nothing new) for a long while, so the finale
+        // was never answered. Fail honestly instead of hanging to the deadline.
+        if (Date.now() - lastProgressAt > STALL_TIMEOUT_MS) {
+            throw new Error(
+                "Gemini stopped responding after the last message - the finale was likely never answered (anonymous burst limit). " +
+                    "Wait a minute and retry (or `node index.js --continue`), or log in with `node index.js --login --provider gemini` to lift the limit."
+            );
         }
 
         const now = Date.now();
@@ -688,7 +905,11 @@ async function waitForAnswer(page, assistantCountBefore = 0, options = {}) {
     }
 
     console.log(`>> Generation stable (${totalPolls} polls, final length: ${prevLength} chars, took ${Date.now() - stabStart}ms).`);
-    let markdown = await extractAnswerMarkdown(page, answer, options);
+    // Re-resolve: another bubble may have arrived while stabilizing (e.g. the
+    // finale answer landing just after a late per-part ack) - extracting from
+    // the stale handle would copy the wrong message.
+    const finalAnswer = replies.last();
+    let markdown = await extractAnswerMarkdown(page, finalAnswer, options);
     if (!markdown) {
         throw new Error(
             "Failed to capture response via Gemini's Copy button — no fallback is configured. " +
@@ -734,7 +955,11 @@ module.exports = {
     waitForGenerationEnd,
     composerEmpty,
     composerHasContent,
+    isUsageLimitText,
+    looksLikePartAck,
+    extractConversationId,
     transcriptContainsText,
+    isFreshAssistantAnswer,
     findCopyButton,
     extractAnswerMarkdown,
     waitForAnswer,
