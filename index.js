@@ -2031,7 +2031,20 @@ async function sendFinaleConfirmed(page, input, text, attempts = 3) {
 
         await waitForSendReady(page);
 
+        const userCountBefore = await userMessages(page).count().catch(() => 0);
         await trySend(page, sendButton(page), { requireVisible: true });
+
+        // Confirm the click was actually accepted (user bubble +1, composer
+        // cleared, or generation started). Clicking while a reply is still
+        // generating is a no-op that leaves the composer full - without this
+        // check we would burn the whole landing timeout on an unsent finale
+        // and then mistake a stale per-part ack for the finale answer.
+        const accepted = await waitForSendAccepted(page, userCountBefore, 8000);
+        if (!accepted) {
+            console.log(`>> Finale send not accepted (attempt ${attempt}/${attempts}), retrying...`);
+            await dismissAndSettle(page, 500);
+            continue;
+        }
 
         const deadline = Date.now() + 30000;
         while (Date.now() < deadline) {
@@ -2053,7 +2066,7 @@ async function sendChunkedPayload(page, input, plan, finalQuestion) {
     }
 
     console.log(">> All parts delivered, sending TRANSMISSION COMPLETE + question...");
-    const baseline = await assistantMessages(page).count();
+    const preFinaleCount = await assistantMessages(page).count();
     const sent = await sendFinaleConfirmed(page, input, buildTransmissionFinale(plan.totalParts, finalQuestion));
     if (!sent) {
         throw new Error(
@@ -2061,7 +2074,20 @@ async function sendChunkedPayload(page, input, plan, finalQuestion) {
         );
     }
     console.log(">> TRANSMISSION COMPLETE confirmed.");
-    return baseline;
+    // A per-part ack ("Got part N/N...") can still be streaming in when the
+    // finale lands. Give it a brief moment to settle, then re-baseline: from
+    // this snapshot on, the only pending generation is the finale answer, so
+    // waitForAnswer can require a strictly newer bubble instead of trusting
+    // whatever count growth it sees first (which used to be the stale ack).
+    // Short timeout on purpose - if the finale answer itself started fast,
+    // its generation keeps the stop button visible and we must NOT wait it
+    // out here, or the snapshot would swallow the real answer.
+    await waitForGenerationEnd(page, 8000);
+    const settled = assistantMessages(page);
+    const postCount = await settled.count();
+    const postText = postCount > 0 ? (await settled.last().innerText().catch(() => "")).trim() : "";
+    console.log(`>> Post-finale baseline: ${postCount} replies (was ${preFinaleCount} before finale).`);
+    return { count: postCount, text: postText };
 }
 
 async function promptHasExpectedText(page, expectedParts) {
@@ -2166,7 +2192,7 @@ async function sendQuestion(page, question, targetUrl = URL, context = null) {
     if (deliveryPlan) {
         const finalInput = promptInput(page);
         const baseline = await sendChunkedPayload(page, finalInput, deliveryPlan, question.originalText ?? question.text);
-        console.log(`>> Chunked transmission complete (baseline: ${baseline} replies).`);
+        console.log(`>> Chunked transmission complete (baseline: ${baseline.count} replies).`);
         markPhase("write");
         markPhase("send");
         return baseline;
@@ -2321,10 +2347,38 @@ async function extractAnswerMarkdown(page, answer, options = {}) {
     return typeof text === "string" && text.trim() ? text : null;
 }
 
+// Pure predicate: is the currently-visible last assistant bubble a genuinely
+// new answer relative to a post-finale baseline snapshot?
+//
+// Background: after a chunked transmission, a late per-part ack ("Got part
+// 3/3...") can land after the pre-finale count snapshot, so `count >
+// countBefore` alone fires on the stale ack. The stale bubble only ever shows
+// text that was already on screen, while the finale answer always arrives as
+// a new bubble with new text - hence the strict text-inequality requirement.
+// Kept pure (no page access) so it is unit-testable.
+function isFreshAssistantAnswer(seen, baseline) {
+    if (!seen || !baseline) return false;
+    if (typeof seen.count !== "number" || typeof baseline.count !== "number") return false;
+    if (seen.count <= baseline.count) return false;
+    if (!seen.text) return false;
+    if (seen.text === baseline.text) return false;
+    if (baseline.previousText && seen.text === baseline.previousText) return false;
+    return true;
+}
+
 async function waitForAnswer(page, assistantCountBefore = 0, options = {}) {
     console.log(">> Waiting for answer to appear...");
     const replies = assistantMessages(page);
     const previousLastText = (await replies.last().innerText().catch(() => "")).trim();
+    // Chunked path only: post-finale snapshot taken after the finale send was
+    // accepted and late per-part acks settled (see sendChunkedPayload).
+    const answerBaseline =
+        options && options.baseline && typeof options.baseline.count === "number"
+            ? { count: options.baseline.count, text: options.baseline.text || "", previousText: previousLastText }
+            : null;
+    if (answerBaseline) {
+        console.log(`>> Waiting for a new answer after the finale (baseline: ${answerBaseline.count} replies).`);
+    }
 
     const deadline = Date.now() + 3 * 60 * 1000;
     let sawGeneration = false;
@@ -2342,7 +2396,13 @@ async function waitForAnswer(page, assistantCountBefore = 0, options = {}) {
         const grew = count > assistantCountBefore;
         const newText = count > 0 ? (await replies.last().innerText().catch(() => "")).trim() : "";
 
-        if (grew || ((sawGeneration || (await composerEmpty(page))) && !stopVisible && newText && newText !== previousLastText)) {
+        // On the chunked path a stale per-part ack may already satisfy `grew`
+        // the moment polling starts - only trust growth that also brings
+        // previously-unseen text (see isFreshAssistantAnswer).
+        const grewFresh =
+            grew && answerBaseline ? isFreshAssistantAnswer({ count, text: newText }, answerBaseline) : grew;
+
+        if (grewFresh || ((sawGeneration || (await composerEmpty(page))) && !stopVisible && newText && newText !== previousLastText)) {
             ready = true;
             const elapsed = ((Date.now() - (deadline - 3 * 60 * 1000)) / 1000).toFixed(1);
             console.log(`>> Answer appeared after ${elapsed}s (replies: ${count}, text length: ${newText.length}).`);
@@ -2412,7 +2472,11 @@ async function waitForAnswer(page, assistantCountBefore = 0, options = {}) {
 
     console.log(`>> Generation stable (${totalPolls} polls, final length: ${prevLength} chars, took ${Date.now() - stabStart}ms).`);
     markPhase("generate");
-    let markdown = await extractAnswerMarkdown(page, answer, options);
+    // Re-resolve: another bubble may have arrived while stabilizing (e.g. the
+    // finale answer landing just after a late per-part ack) - extracting from
+    // the stale handle would copy the wrong message.
+    const finalAnswer = replies.last();
+    let markdown = await extractAnswerMarkdown(page, finalAnswer, options);
     if (!markdown) {
         throw new Error(
             "Failed to capture response via Copy button — no fallback is configured. " +
@@ -3226,9 +3290,18 @@ async function main() {
         }
         popupMonitor = provider.startPopupMonitor(page);
         console.log(">> Popup safety monitor active (continuous blocking-UI detection).");
-        const assistantCountBefore = await provider.sendQuestion(page, question, targetUrl, context);
+        const sendResult = await provider.sendQuestion(page, question, targetUrl, context);
+        // Chunked transmissions return a post-finale { count, text } snapshot
+        // so waitForAnswer can tell the finale answer apart from a late
+        // per-part ack; single-paste paths return a plain assistant count.
+        const assistantCountBefore =
+            typeof sendResult === "object" && sendResult !== null ? sendResult.count : sendResult;
+        const answerOptions =
+            typeof sendResult === "object" && sendResult !== null
+                ? { baseline: { count: sendResult.count, text: sendResult.text }, chunked: true }
+                : undefined;
         console.log(">> Prompt sent, waiting for response...");
-        const reply = await provider.waitForAnswer(page, assistantCountBefore);
+        const reply = await provider.waitForAnswer(page, assistantCountBefore, answerOptions);
         console.log("\n--- ANSWER ---\n");
         console.log(reply.trim());
         const trimmed = reply.trim();
@@ -3283,6 +3356,7 @@ module.exports = {
     OPTION_DEFINITIONS,
     DEFAULT_QUESTION,
     DEFAULT_OUTPUT_FILE,
+    isFreshAssistantAnswer,
     AI_PREFS_FILE,
     PREFS_FILE,
     loadAIPrefs,
