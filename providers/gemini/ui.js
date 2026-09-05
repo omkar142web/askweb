@@ -1,6 +1,7 @@
 "use strict";
 
 const fs = require("fs");
+const { markPhase } = require("../../lib/timing");
 
 const COMPOSER_SELECTORS = [
     '[aria-label="Enter a prompt for Gemini"]',
@@ -948,6 +949,7 @@ async function waitForAnswer(page, assistantCountBefore = 0, options = {}) {
     }
 
     console.log(`>> Generation stable (${totalPolls} polls, final length: ${prevLength} chars, took ${Date.now() - stabStart}ms).`);
+    markPhase("generate");
     // Re-resolve: another bubble may have arrived while stabilizing (e.g. the
     // finale answer landing just after a late per-part ack) - extracting from
     // the stale handle would copy the wrong message.
@@ -960,6 +962,7 @@ async function waitForAnswer(page, assistantCountBefore = 0, options = {}) {
         );
     }
     console.log(`>> Raw Markdown captured via copy button (${markdown.length} chars).`);
+    markPhase("extract");
     return markdown;
 }
 

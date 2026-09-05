@@ -3,6 +3,7 @@
 const crypto = require("crypto");
 const path = require("path");
 const ui = require("./ui");
+const { markPhase } = require("../../lib/timing");
 const { registerProvider } = require("..");
 const {
     buildFullPrompt,
@@ -416,6 +417,7 @@ async function sendQuestion(page, question, targetUrl, context) {
 
     await page.waitForTimeout(500);
     console.log(">> Prompt input ready.");
+    markPhase("ready");
 
     const assistantCountBefore = await ui.assistantMessages(page).count().catch(() => 0);
 
@@ -497,6 +499,8 @@ async function sendQuestion(page, question, targetUrl, context) {
         const finalQuestion = question.text || "";
         const baseline = await sendChunkedPayload(page, finalInput, deliveryPlan, finalQuestion);
         console.log(`>> Chunked transmission complete (baseline: ${baseline.count} replies).`);
+        markPhase("write");
+        markPhase("send");
         return baseline;
     }
 
@@ -524,9 +528,11 @@ async function sendQuestion(page, question, targetUrl, context) {
     if (!verified) {
         try { await finalInput.click({ timeout: 10000, force: true }); } catch {}
     }
+    markPhase("write");
 
     console.log(">> Sending prompt...");
     await ui.pressSendAndConfirm(page);
+    markPhase("send");
 
     return assistantCountBefore;
 }

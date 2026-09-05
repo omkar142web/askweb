@@ -356,21 +356,7 @@ const { createChatGptProvider } = require("./providers/chatgpt");
 
 let CHATGPT_PROVIDER = null;
 
-const T0 = Date.now();
-const PHASES = [];
-function markPhase(name) {
-    PHASES.push([name, Date.now() - T0]);
-}
-function printTimings() {
-    if (PHASES.length === 0) return;
-    const parts = [];
-    for (let i = 0; i < PHASES.length; i++) {
-        const start = i === 0 ? 0 : PHASES[i - 1][1];
-        parts.push(`${PHASES[i][0]}=${((PHASES[i][1] - start) / 1000).toFixed(1)}s`);
-    }
-    console.log(`>> [timing] ${parts.join(", ")} | total=${((Date.now() - T0) / 1000).toFixed(1)}s`);
-}
-
+const { markPhase, printTimings } = require("./lib/timing");
 function withTimeout(promise, ms, label) {
     let timer;
     const timeout = new Promise((_, reject) => {
