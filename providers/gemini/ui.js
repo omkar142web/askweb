@@ -327,11 +327,25 @@ async function clearComposer(page, input) {
     // input.fill("") hangs on contenteditable rich-text composers (Gemini's
     // .ql-editor div), so clear with select-all + delete, which works for
     // both contenteditable divs and plain textareas.
+    // Fast path first: a single evaluate clear (~20ms) handles the common
+    // empty-or-stale case without keyboard round-trips. Only fall back to
+    // Ctrl+A + Backspace when content actually remains.
+    const cleared = await promptInput(page)
+        .evaluate((el) => {
+            const text = "value" in el ? el.value || "" : el.innerText || el.textContent || "";
+            if (!text) return true;
+            if ("value" in el) el.value = "";
+            else el.innerHTML = "";
+            el.dispatchEvent(new InputEvent("input", { bubbles: true }));
+            return true;
+        })
+        .catch(() => false);
+    if (cleared && (await composerEmpty(page).catch(() => true))) return;
     try {
         await input.press(process.platform === "darwin" ? "Meta+a" : "Control+a");
-        await page.waitForTimeout(50);
+        await page.waitForTimeout(30);
         await input.press("Backspace");
-        await page.waitForTimeout(100);
+        await page.waitForTimeout(50);
     } catch { /* fall through to the evaluate fallback below */ }
     if (!(await composerEmpty(page).catch(() => true))) {
         await promptInput(page)
@@ -359,23 +373,29 @@ async function pasteViaClipboardKeys(page, input, text) {
     try {
         await input.click({ timeout: 5000, force: true });
     } catch { /* already focused from typePrompt */ }
-    await page.waitForTimeout(150);
+    await page.waitForTimeout(80);
     await page.keyboard.press(process.platform === "darwin" ? "Meta+a" : "Control+a");
-    await page.waitForTimeout(50);
+    await page.waitForTimeout(40);
     await page.keyboard.press(process.platform === "darwin" ? "Meta+v" : "Control+v");
-    for (let check = 0; check < 8; check++) {
-        await page.waitForTimeout(400);
+    // Fast verify: one quick check covers the common instant-paste case;
+    // the short poll loop only runs when the composer is still catching up.
+    await page.waitForTimeout(200);
+    if ((await composerTextLength(page)) >= text.length * 0.7) return true;
+    for (let check = 0; check < 5; check++) {
+        await page.waitForTimeout(250);
         if ((await composerTextLength(page)) >= text.length * 0.7) return true;
     }
     return false;
 }
 
 async function pasteViaInsertText(page, text) {
-    // Slice feed so a single huge insertion doesn't block the page; 2000
-    // chars per slice with surrogate-pair-safe boundaries.
+    // Slice feed so a single huge insertion doesn't block the page; 8000
+    // chars per slice (vs the old 2000) cuts a 29KB part from ~15 inserts
+    // to ~4, with surrogate-pair-safe boundaries.
+    const SLICE = 8000;
     let offset = 0;
     while (offset < text.length) {
-        let end = Math.min(offset + 2000, text.length);
+        let end = Math.min(offset + SLICE, text.length);
         const lastCode = text.charCodeAt(end - 1);
         if (lastCode >= 0xd800 && lastCode <= 0xdbff && end < text.length) end += 1;
         try {
@@ -384,7 +404,7 @@ async function pasteViaInsertText(page, text) {
             return false;
         }
         offset = end;
-        await page.waitForTimeout(30);
+        await page.waitForTimeout(20);
     }
     return true;
 }
@@ -414,7 +434,9 @@ async function typePrompt(page, input, text) {
         }
     }
 
-    await page.waitForTimeout(400);
+    // Short settle: transmitPart verifies composer content immediately after,
+    // so no need for the old 400ms tail on every part.
+    await page.waitForTimeout(200);
 }
 
 async function sendButtonUsable(page) {
@@ -428,6 +450,18 @@ async function sendButtonUsable(page) {
             selector("sendButton")
         )
         .catch(() => false);
+}
+
+// Poll until the send button becomes clickable (or 5s elapses). Mirrors the
+// ChatGPT path's waitForSendReady: proceeding while the button is still a
+// disabled/stop button turns the click into a no-op and burns a full
+// landing timeout on an unsent part.
+async function waitForSendReady(page, timeoutMs = 5000) {
+    const deadline = Date.now() + timeoutMs;
+    while (!(await sendButtonUsable(page))) {
+        if (Date.now() >= deadline) break;
+        await page.waitForTimeout(250);
+    }
 }
 
 async function trySend(page, sendBtn) {
@@ -518,7 +552,7 @@ async function waitForGenerationEnd(page, timeoutMs = 10 * 60 * 1000) {
             console.log(">> Waiting for in-flight generation to settle...");
             noticed = true;
         }
-        await page.waitForTimeout(750);
+        await page.waitForTimeout(500);
     }
     return false;
 }
@@ -740,7 +774,7 @@ async function waitForAnswer(page, assistantCountBefore = 0, options = {}) {
     // means the prompt was throttled/dropped, and polling longer cannot help.
     // With options.finale (chunked path) we resend once after a cooldown
     // first, since burst throttles are often time-based.
-    const { noGenerationTimeoutMs = 60000, finale: finaleText = null } = options;
+    const { noGenerationTimeoutMs = 45000, finale: finaleText = null } = options;
     let waitStart = Date.now();
     let retriedFinale = false;
     // Chunked path only: post-finale snapshot taken after the finale send was
@@ -815,18 +849,18 @@ async function waitForAnswer(page, assistantCountBefore = 0, options = {}) {
         if (!sawGeneration && Date.now() - waitStart > noGenerationTimeoutMs) {
             if (finaleText && !retriedFinale) {
                 retriedFinale = true;
-                console.log(">> No generation started - cooling down 30s, then resending the finale once...");
-                await page.waitForTimeout(30000);
+                console.log(">> No generation started - cooling down 15s, then resending the finale once...");
+                await page.waitForTimeout(15000);
                 await typePrompt(page, promptInput(page), finaleText);
                 const userBefore = await userMessages(page).count().catch(() => 0);
                 await trySend(page, sendButton(page));
-                const resent = await waitForSendAccepted(page, userBefore, 10000);
+                const resent = await waitForSendAccepted(page, userBefore, 8000);
                 console.log(resent ? ">> Finale resent, waiting for generation..." : ">> Finale resend not accepted, continuing to wait...");
                 waitStart = Date.now();
                 continue;
             }
             throw new Error(
-                "Gemini did not start generating within 60s of the sent prompt - the anonymous session was likely rate-limited after rapid sends. " +
+                "Gemini did not start generating within 45s of the sent prompt - the anonymous session was likely rate-limited after rapid sends. " +
                     "Wait a minute and retry (or `node index.js --continue`), or log in with `node index.js --login --provider gemini` to lift the limit."
             );
         }
@@ -957,6 +991,7 @@ module.exports = {
     attachViaChooser,
     typePrompt,
     sendButtonUsable,
+    waitForSendReady,
     trySend,
     waitForSendAccepted,
     pressSendAndConfirm,

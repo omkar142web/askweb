@@ -307,9 +307,9 @@ For binary uploads, the following strategies are tried in order:
   Gemini parts are limited to ~29 KB each (vs ChatGPT's ~49 KB packing): the
   same payload needs more parts on Gemini, and the anonymous 6-part budget
   holds fewer total characters (~170 KB). Anonymous Gemini bursts are also
-  throttled server-side: parts are paced ~3s apart, and if generation never
-  starts the finale is resent once after a 30s cooldown before failing fast
-  with a rate-limit hint (wait a minute and retry, or log in).
+  throttled server-side: parts send back-to-back after each ack (250ms settle),
+  and if generation never starts the finale is resent once after a 15s cooldown
+  before failing fast with a rate-limit hint (wait a minute and retry, or log in).
 - Set `ASKWEB_CHUNK_SIZE=<chars>` to override the automatic part size (applies
   to both providers; an explicit override skips the Gemini 29 KB cap).
 
@@ -494,9 +494,9 @@ ASKWEB_MAX_CMD_OUTPUT=20000 node index.js --cmd "git log"
 - Gemini typically requires a Google login; anonymous Gemini sessions may be
   refused or capped by Google. ChatGPT works anonymously.
 - Anonymous Gemini bursts may be throttled even under the cap: sends are
-  accepted but never generate a reply. askweb paces parts ~3s apart, resends
-  the finale once after a 30s cooldown if nothing generates within 60s, and
-  aborts after 90s without progress instead of hanging.
+  accepted but never generate a reply. askweb sends parts back-to-back after
+  each ack, resends the finale once after a 15s cooldown if nothing generates
+  within 45s, and aborts after 90s without progress instead of hanging.
 - Unknown `--provider` names exit with an error listing the available providers
   (`chatgpt`, `gemini`).
 
@@ -532,7 +532,7 @@ ASKWEB_MAX_CMD_OUTPUT=20000 node index.js --cmd "git log"
 #   - Run: node index.js --login  and re-send (uploads as one attachment)
 
 # Gemini rate-limited after rapid anonymous sends
-#   - "did not start generating within 60s" or "stopped responding":
+#   - "did not start generating within 45s" or "stopped responding":
 #     wait a minute and retry (or node index.js --continue),
 #     or log in with: node index.js --login --provider gemini
 

@@ -25,7 +25,8 @@ const CONVERSATION_URL_RE = null;
 // on each part's ack completion (transmitPart awaits generation end), so a
 // typical gap is many seconds and no extra sleep is needed - this floor only
 // kicks in for freak sub-second round-trips, keeping a burst profile tame.
-const MIN_PART_GAP_MS = 1000;
+// Kept at 250ms (just DOM settle) so chunked sends don't feel paused.
+const MIN_PART_GAP_MS = 250;
 
 // Measured with a live probe (Sep 2026): Gemini's composer silently
 // truncates pasted input at exactly 32,001 chars, cutting off the part
@@ -195,7 +196,7 @@ async function sendFinaleConfirmed(page, input, text, attempts = 3) {
             }
         }
 
-        await page.waitForTimeout(500);
+        await page.waitForTimeout(300);
         const userCountBefore = await ui.userMessages(page).count().catch(() => 0);
         await ui.trySend(page, ui.sendButton(page));
 
@@ -219,7 +220,7 @@ async function sendFinaleConfirmed(page, input, text, attempts = 3) {
         // already answering - causing duplicate finale resends. Brief settle
         // to let the bubble render, then proceed; the finale answer itself
         // is awaited by waitForAnswer via the post-finale baseline.
-        await page.waitForTimeout(500);
+        await page.waitForTimeout(300);
         return true;
     }
     return false;
@@ -250,6 +251,7 @@ async function transmitPart(page, input, part, index, total) {
         if (!(await ui.sendButtonUsable(page))) {
             console.log(" send button not enabled yet, waiting...");
             await waitForGenerationEnd(page);
+            await ui.waitForSendReady(page);
         }
 
         const userBefore = await ui.userMessages(page).count().catch(() => 0);
@@ -261,21 +263,28 @@ async function transmitPart(page, input, part, index, total) {
         // never confirm. Send-acceptance (new user bubble / cleared composer
         // / generation started) is the reliable landing signal instead -
         // then await the per-part "OK" ack before returning.
-        const accepted = await ui.waitForSendAccepted(page, userBefore, 10000);
+        const accepted = await ui.waitForSendAccepted(page, userBefore, 8000);
         if (accepted) {
             console.log(" accepted.");
             await waitForGenerationEnd(page);
             return true;
         }
 
-        const landing = await waitForPartLanding(page, closeTag, 15000);
-        if (landing.ok) {
-            console.log(" landed.");
-            await waitForGenerationEnd(page);
-            return true;
-        }
+        // Send not accepted: if the composer is still full the click was a
+        // no-op, so skip the landing poll entirely and go straight to retry
+        // instead of burning 15s on a poll that cannot succeed.
+        if (await composerHasContent(page, closeTag, Math.floor(part.length * 0.5))) {
+            console.log(" not accepted (composer still full), retrying without landing wait...");
+        } else {
+            const landing = await waitForPartLanding(page, closeTag, 8000);
+            if (landing.ok) {
+                console.log(" landed.");
+                await waitForGenerationEnd(page);
+                return true;
+            }
 
-        console.log(` not confirmed (attempt ${attempt}/2)${landing.snippet ? `, last message starts: "${landing.snippet}"` : ""}.`);
+            console.log(` not confirmed (attempt ${attempt}/2)${landing.snippet ? `, last message starts: "${landing.snippet}"` : ""}.`);
+        }
 
         if (await looksLikeUsageLimit(page)) {
             const diag = await collectFailureDiagnostics(page);
@@ -285,7 +294,7 @@ async function transmitPart(page, input, part, index, total) {
         }
 
         if (attempt < 2) {
-            await page.waitForTimeout(8000);
+            await page.waitForTimeout(5000);
             await ui.dismissAndSettle(page, 500);
         }
     }
