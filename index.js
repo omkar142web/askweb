@@ -59,7 +59,7 @@ const RESERVED_PROMPT_FLAGS = new Set([
     "o", "output", "login", "continue", "new", "browser", "browser-order", "browser-reset",
     "clear-session", "clear-conversations", "clear-conversation", "help", "h", "version", "v",
     "prompts", "prompt-create", "append", "prepend", "logout", "dry-run", "cmd",
-    "provider", "ai", "ai-order", "ai-reset",
+    "provider", "ai", "ai-order", "ai-reset", "print",
 ]);
 
 const CMD_TIMEOUT_MS = 30_000;
@@ -564,6 +564,12 @@ const OPTION_DEFINITIONS = [
         example: 'askweb --prepend --output notes.md "New intro at top"',
     },
     {
+        flags: ["--print"],
+        desc: "Print the answer to stdout and never write the answer file.",
+        note: "Strict: cannot be combined with -o/--output, --append, or --prepend (except with --dry-run, which writes nothing). Skips only the answer file; conversation history is still saved. Ideal for AI CLIs and scripts: askweb --print \"question\".",
+        example: 'askweb --print "Explain closures"',
+    },
+    {
         flags: ["--login"],
         desc: "Open the ChatGPT login page and wait for you to sign in so the session cookie is saved.",
         note: "Standalone action: ignores the question, files, --continue, and --new.",
@@ -781,7 +787,9 @@ function parseCliArgs(argv = process.argv.slice(2)) {
         promptCreate: null,
         promptsAction: null,
         outputFile: DEFAULT_OUTPUT_FILE,
+        outputExplicit: false,
         outputMode: "overwrite",
+        print: false,
         questionArgs: [],
         commands: [],
     };
@@ -898,6 +906,11 @@ function parseCliArgs(argv = process.argv.slice(2)) {
             continue;
         }
 
+        if (arg === "--print") {
+            options.print = true;
+            continue;
+        }
+
         if (arg === "--help" || arg === "-h") {
             options.showHelp = true;
             continue;
@@ -947,6 +960,7 @@ function parseCliArgs(argv = process.argv.slice(2)) {
                 throw new Error(`${arg} requires a file path (use ${arg}=<path> to pass a value starting with "-")`);
             }
             options.outputFile = stripShellQuotes(value);
+            options.outputExplicit = true;
             i++;
             continue;
         }
@@ -971,6 +985,7 @@ function parseCliArgs(argv = process.argv.slice(2)) {
             const value = arg.slice("--output=".length);
             if (!value) throw new Error("--output requires a file path");
             options.outputFile = stripShellQuotes(value);
+            options.outputExplicit = true;
             continue;
         }
 
@@ -995,6 +1010,19 @@ function parseCliArgs(argv = process.argv.slice(2)) {
 
     if (options.continueLast && options.newConversation) {
         throw new Error("Use either --continue or --new, not both.");
+    }
+
+    // Dry runs never write the answer file (they return before any save),
+    // so --print has nothing to conflict with there -- --dry-run -o x is
+    // legal today and stays legal with --print added.
+    if (!options.dryRun) {
+        if (options.print && options.outputExplicit) {
+            throw new Error("Use either --print or -o/--output, not both. --print never writes the answer file.");
+        }
+
+        if (options.print && options.outputMode !== "overwrite") {
+            throw new Error("Use either --print or --append/--prepend, not both. --print never writes the answer file.");
+        }
     }
 
     return options;
@@ -3296,22 +3324,29 @@ async function main() {
         console.log(">> Prompt sent, waiting for response...");
         const reply = await provider.waitForAnswer(page, assistantCountBefore, answerOptions);
         console.log("\n--- ANSWER ---\n");
-        console.log(reply.trim());
+        // Answer always goes to stdout.
+        process.stdout.write(reply.trim() + "\n");
         const trimmed = reply.trim();
-        console.log(`>> Writing answer to ${CLI.outputFile} (${trimmed.length} chars, mode: ${CLI.outputMode})...`);
-        if (CLI.outputMode !== "overwrite") {
-            const existing = fs.existsSync(CLI.outputFile)
-                ? fs.readFileSync(CLI.outputFile, "utf8").replace(/\n+$/, "")
-                : "";
-            fs.writeFileSync(
-                CLI.outputFile,
-                CLI.outputMode === "prepend"
-                    ? trimmed + "\n\n\n" + existing
-                    : existing + "\n\n\n" + trimmed,
-                "utf8"
-            );
-        } else {
-            fs.writeFileSync(CLI.outputFile, trimmed + "\n", "utf8");
+        // Strict --print: never write the answer file (parseCliArgs already
+        // rejects --print combined with -o/--output/--append/--prepend).
+        // Conversation history below is still recorded so --continue keeps
+        // working; only the answer output file is skipped.
+        if (!CLI.print) {
+            console.log(`>> Writing answer to ${CLI.outputFile} (${trimmed.length} chars, mode: ${CLI.outputMode})...`);
+            if (CLI.outputMode !== "overwrite") {
+                const existing = fs.existsSync(CLI.outputFile)
+                    ? fs.readFileSync(CLI.outputFile, "utf8").replace(/\n+$/, "")
+                    : "";
+                fs.writeFileSync(
+                    CLI.outputFile,
+                    CLI.outputMode === "prepend"
+                        ? trimmed + "\n\n\n" + existing
+                        : existing + "\n\n\n" + trimmed,
+                    "utf8"
+                );
+            } else {
+                fs.writeFileSync(CLI.outputFile, trimmed + "\n", "utf8");
+            }
         }
         const conversation = await recordConversation(page, {
             questionText: question.originalText ?? question.text,
@@ -3322,7 +3357,11 @@ async function main() {
         });
         markPhase("save");
         printTimings();
-        console.log(`\n>> Answer saved to ${CLI.outputFile}`);
+        if (CLI.print) {
+            console.log("\n>> Answer printed to stdout (--print, no answer file written; history still saved).");
+        } else {
+            console.log(`\n>> Answer saved to ${CLI.outputFile}`);
+        }
         if (conversation) {
             console.log(
                 `>> Conversation history saved locally (${conversation.id}, ${conversation.messages.length} messages). Continue with \`node index.js --continue\`.`

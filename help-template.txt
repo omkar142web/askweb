@@ -204,13 +204,18 @@ OUTPUT
   -o, --output <file>   Write the answer to <file> (default: {{DEFAULT_OUTPUT_FILE}}).
   --append              Append the answer to an existing output file.
   --prepend             Prepend the answer to an existing output file.
+  --print               Print the answer to stdout and never write the answer file.
   The output path is resolved relative to your current directory. --append
   and --prepend both require --output and cannot be used together; without
-  either, the file is overwritten.
+  either, the file is overwritten. --print is strict: it cannot be combined
+  with -o/--output, --append, or --prepend (except with --dry-run, which
+  writes nothing). --print skips only the answer file; conversation history
+  is still saved so --continue keeps working.
   Example:
     askweb -o answer.md "Explain closures"
     askweb --append --output notes.md "Add a section"
     askweb --prepend --output notes.md "New intro at top"
+    askweb --print "Explain closures"
 
 VALID COMBINATIONS
   askweb --continue "Give me another example"
@@ -243,6 +248,10 @@ INVALID USAGE
     -> Use either --append or --prepend, not both.
   askweb --append --append
     -> Use either --append or --prepend, not both.
+  askweb --print -o out.md "hello"
+    -> Use either --print or -o/--output, not both. --print never writes the answer file.
+  askweb --print --append --output notes.md "hello"
+    -> Use either --print or --append/--prepend, not both. --print never writes the answer file.
   askweb --output
     -> --output requires a file path.
   askweb --clear-conversation

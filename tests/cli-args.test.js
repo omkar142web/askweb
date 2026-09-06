@@ -107,6 +107,70 @@ check("--provider in OPTION_DEFINITIONS", (() => {
     return true;
 })());
 
+check("--print defaults to false", (() => {
+    const opts = parseCliArgs(["hello"]);
+    check("print is false", opts.print === false);
+    check("outputExplicit is false", opts.outputExplicit === false);
+    return true;
+})());
+
+check("--print parses correctly", (() => {
+    const opts = parseCliArgs(["--print", "hello"]);
+    check("print is true", opts.print === true);
+    check("question captured", opts.questionArgs.includes("hello"));
+    return true;
+})());
+
+check("--print with -o/--output throws", (() => {
+    let threw = false;
+    try {
+        parseCliArgs(["--print", "-o", "out.md", "hi"]);
+    } catch {
+        threw = true;
+    }
+    check("throws for --print -o", threw);
+    threw = false;
+    try {
+        parseCliArgs(["--print", "--output=x.md", "hi"]);
+    } catch {
+        threw = true;
+    }
+    check("throws for --print --output=", threw);
+    return true;
+})());
+
+check("--print with --append/--prepend throws", (() => {
+    let threw = false;
+    try {
+        parseCliArgs(["--print", "--append", "--output", "x.md", "hi"]);
+    } catch {
+        threw = true;
+    }
+    check("throws for --print --append", threw);
+    threw = false;
+    try {
+        parseCliArgs(["--print", "--prepend", "--output", "x.md", "hi"]);
+    } catch {
+        threw = true;
+    }
+    check("throws for --print --prepend", threw);
+    return true;
+})());
+
+check("--print with --dry-run allows -o (dry run writes nothing)", (() => {
+    const opts = parseCliArgs(["--print", "--dry-run", "-o", "out.md", "hi"]);
+    check("print is true", opts.print === true);
+    check("dryRun is true", opts.dryRun === true);
+    return true;
+})());
+
+check("--print is in RESERVED_PROMPT_FLAGS and OPTION_DEFINITIONS", (() => {
+    check("print is reserved", RESERVED_PROMPT_FLAGS.has("print"));
+    const printOpt = OPTION_DEFINITIONS.find((o) => o.flags.includes("--print"));
+    check("--print defined", printOpt !== undefined);
+    return true;
+})());
+
 restorePrefs();
 
 console.log(`\n${total - failures.length}/${total} passed`);

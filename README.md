@@ -158,6 +158,7 @@ A new user can run `node index.js --help` for the full in-tool mini-manual.
 | `-o`, `--output` | `<file>` | Save the answer to a file (default: `./output.md`). Also accepts `--output=<file>`. |
 | `--append` | — | Append the answer to an existing output file. Requires `--output`. |
 | `--prepend` | — | Prepend the answer to an existing output file. Requires `--output`. |
+| `--print` | — | Print the answer to stdout and never write the answer file. Strict: cannot be combined with `-o`/`--output`, `--append`, or `--prepend` (except with `--dry-run`, which writes nothing). Conversation history is still saved. |
 | `--login` | — | Open the selected AI site to log in and save the session. Standalone (ignores question/files/`--continue`/`--new`). |
 | `--logout` | — | Open the selected AI site to log out manually; the session cookie is cleared. Standalone (up to 10 min). |
 | `--continue` | `[id]` | Resume the most recent conversation, or a specific one by id prefix. |
@@ -185,6 +186,7 @@ A new user can run `node index.js --help` for the full in-tool mini-manual.
 
 - `--continue` and `--new` cannot be used together.
 - `--append` and `--prepend` cannot be used together (and each requires `--output`).
+- `--print` cannot be used with `-o`/`--output`, `--append`, or `--prepend` (except alongside `--dry-run`, which writes nothing).
 - Only one prompt preset may be used per run (`--explain --review` is rejected).
 - `--output` and `--clear-conversation` each require their argument.
 - `--continue=<id>` is not supported; use a space: `--continue <id>`.
@@ -353,8 +355,13 @@ Answers are saved to `./output.md` by default. Use `-o` to change the path.
 - `-o`, `--output <file>` — write the answer to `<file>` (overwrites by default).
 - `--append` — append the answer after existing content.
 - `--prepend` — prepend the answer before existing content.
+- `--print` — print the answer to stdout and never write the answer file (e.g. for AI CLIs and scripts: `askweb --print "Explain closures"`).
 
 `--append` and `--prepend` are mutually exclusive and both require `--output`.
+`--print` is strict: it cannot be combined with `-o`/`--output`, `--append`,
+or `--prepend` (except with `--dry-run`, which writes nothing). Note `--print`
+skips only the answer file — conversation history is still recorded so
+`--continue` keeps working.
 The output path (`-o`) is resolved relative to your current working directory;
 all other paths (browser profiles, history, preferences) live in the install
 directory.
