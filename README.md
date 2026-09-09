@@ -15,7 +15,7 @@ askweb supports multiple AI providers behind a common interface. ChatGPT is the 
 - **Local commands** (`--cmd`) — run a shell command and pipe its output into the prompt sent to the AI
 - **Dry runs** (`--dry-run`) — preview the exact prompt payload that would be sent, without launching a browser
 - Prompt presets as native flags (`--explain`, `--find-error`, ...), with a built-in and a custom (editable) set
-- Append/prepend answer output to an existing file (`--append` / `--prepend`)
+- Append/prepend answer output to an existing file (`--append` / `--prepend`), or print to stdout with no file (`--print`)
 - Multiple browser fallback: Chrome, Brave, Edge (configurable order and default)
 - Login/logout flow with session persistence across runs
 - Works from any working directory: browser profiles, preferences, and history are anchored to the install location
@@ -32,7 +32,7 @@ askweb supports multiple AI providers behind a common interface. ChatGPT is the 
 - **Runtime:** Node.js (CommonJS)
 - **Browser automation:** Playwright (`playwright-extra`)
 - **Stealth:** `puppeteer-extra-plugin-stealth`
-- **AI providers:** pluggable registry in `providers/` (`chatgpt`, `gemini`) with shared payload logic in `lib/payload.js`
+- **AI providers:** pluggable registry in `providers/` (`chatgpt`, `gemini`) with shared payload/transmission logic in `lib/payload.js`
 - **Config:** `dotenv`
 
 ## Installation
@@ -41,10 +41,14 @@ The easiest way to install askweb is from npm as a global CLI:
 
 ```bash
 npm install -g rutkar
-npx playwright install chromium   # one-time: install browser binaries
+npx playwright install chromium   # one-time: install Playwright's browser support
 ```
 
-After installation, `askweb` is available from any directory:
+After installation, `askweb` is available from any directory. The npm package
+is named `rutkar`; the installed command is `askweb`. For asking questions you
+also need a Chromium-based browser installed (Chrome, Brave, or Edge) — askweb
+drives your system browser via a persistent profile, falling back through the
+configured order when one is missing:
 
 ```bash
 askweb "What is JavaScript?"
@@ -85,51 +89,55 @@ npm run wipe
 
 ## Quick Start
 
-`askweb` (global) and `node index.js` are interchangeable in all examples below. You can run either from any directory; only `-o <path>` and file arguments resolve relative to your current working directory.
+`askweb` (global install) and `node index.js` (source checkout) are interchangeable in all examples below. You can run either from any directory; only `-o <path>` and file arguments resolve relative to your current working directory.
 
 ```bash
 # Ask a question
-node index.js "What is JavaScript?"
+askweb "What is JavaScript?"
 
 # Ask with output to a specific file
-node index.js -o result.md "Explain quantum computing"
+askweb -o result.md "Explain quantum computing"
+
+# Print to stdout instead of writing a file (for pipes and AI CLIs)
+askweb --print "Explain closures"
 
 # Attach a text/code file (pasted inline)
-node index.js "Summarize this file" @notes.txt
+askweb "Summarize this file" @notes.txt
 
 # Attach multiple files
-node index.js "Compare these files" file1.json file2.tsx
+askweb "Compare these files" file1.json file2.tsx
 
 # Run a prompt preset
-node index.js --explain "JavaScript closures"
-node index.js --find-error src/index.js
+askweb --explain "JavaScript closures"
+askweb --find-error src/index.js
 
 # Run a local shell command and reason over its output
-node index.js --cmd "git status" "Explain the current repository state."
+askweb --cmd "git status" "Explain the current repository state."
 
 # Preview the payload that would be sent (no browser launched)
-node index.js --dry-run "Explain closures"
+askweb --dry-run "Explain closures"
 
 # Continue the most recent conversation
-node index.js --continue "Follow up question"
+askweb --continue "Follow up question"
 
 # Continue a specific conversation by id prefix
-node index.js --continue a2cc6a02 "More on this"
+askweb --continue a2cc6a02 "More on this"
 
 # Start a fresh conversation
-node index.js --new "New topic"
+askweb --new "New topic"
 
 # Use a specific AI provider for one run
-node index.js --provider gemini "Explain React"
+askweb --provider gemini "Explain React"
 
 # Choose the default AI provider interactively
-node index.js --ai
+askweb --ai
 
 # Question text that starts with a dash
-node index.js -- " -explain this flag"
+askweb -- " -explain this flag"
 
-# Login once (optional; session persists)
-node index.js --login
+# Login once per provider (optional for ChatGPT; session persists)
+askweb --login
+askweb --login --provider gemini
 ```
 
 ## Usage
@@ -173,7 +181,7 @@ A new user can run `node index.js --help` for the full in-tool mini-manual.
 | `--ai` | — | Choose the default AI provider interactively. |
 | `--ai-order` | — | Reorder the AI provider fallback list interactively. |
 | `--ai-reset` | — | Delete saved AI preferences and return to defaults (ChatGPT first). |
-| `--clear-session` | — | Wipe local/session storage before launching (starts logged out). |
+| `--clear-session` | — | Wipe saved local/session storage and cookies before launching (starts logged out). |
 | `--clear-conversations` | — | Delete all saved conversation history. |
 | `--clear-conversation` | `<id>` | Delete one saved conversation by id (prefix match). Also accepts `--clear-conversation=<id>`. |
 | `-h`, `--help` | — | Show help. |
@@ -193,7 +201,8 @@ A new user can run `node index.js --help` for the full in-tool mini-manual.
 - `--dry-run` cannot be combined with standalone actions (`--login`, `--logout`,
   `--browser`, `--browser-order`, `--browser-reset`, `--ai`, `--ai-order`,
   `--ai-reset`, `--prompts`, `--prompt-create`, `--clear-conversations`,
-  `--clear-conversation`).
+  `--clear-conversation`). `--clear-session`, `--continue`/`--new`,
+  `--provider`, `--cmd`, presets, and output flags remain allowed.
 
 ## Local Commands (`--cmd`)
 
@@ -306,19 +315,23 @@ For binary uploads, the following strategies are tried in order:
 - Anonymous (logged-out) transmissions are capped at about ~293 KB (~6 parts)
   on ChatGPT. Beyond that, log in (`askweb --login`) or trim the input.
 - Gemini caps composer input at ~32K chars (truncates at exactly 32,001), so
-  Gemini parts are limited to ~29 KB each (vs ChatGPT's ~49 KB packing): the
-  same payload needs more parts on Gemini, and the anonymous 6-part budget
-  holds fewer total characters (~170 KB). Anonymous Gemini bursts are also
-  throttled server-side: parts send back-to-back after each ack (250ms settle),
-  and if generation never starts the finale is resent once after a 15s cooldown
-  before failing fast with a rate-limit hint (wait a minute and retry, or log in).
+  Gemini part bodies are limited to 29,000 chars each (vs ChatGPT's ~49 KB
+  packing): the same payload needs more parts on Gemini, and the anonymous
+  6-part budget holds fewer total characters (~170 KB). Anonymous Gemini
+  bursts are also throttled server-side: parts send back-to-back with only a
+  short settle gap, and if generation never starts within ~45s the finale is
+  resent once after a 15s cooldown before failing fast with a rate-limit hint
+  (wait a minute and retry, or log in). A long stall with no progress also
+  aborts after ~90s instead of hanging.
 - Set `ASKWEB_CHUNK_SIZE=<chars>` to override the automatic part size (applies
   to both providers; an explicit override skips the Gemini 29 KB cap).
 
 ## Conversation History
 
 Conversation history is saved to `.chatgpt-conversations.json` in the askweb
-install directory. Up to 50 conversations are retained.
+install directory. Up to 50 conversations are retained. The filename is
+historical: entries from every provider (`chatgpt`, `gemini`, ...) share this
+one file.
 
 Each entry stores:
 - `id` (from the ChatGPT URL UUID, a Gemini URL token, or generated)
@@ -414,12 +427,15 @@ node index.js --browser-order  # reorder the fallback list
 node index.js --browser-reset  # reset to automatic (Chrome first)
 ```
 
-`--clear-session` wipes local/session storage for the next launch, so the
-browser starts logged out/anonymous:
+`--clear-session` wipes saved local/session storage and cookies for the next
+launch, so the browser starts logged out/anonymous:
 
 ```bash
 node index.js --clear-session "Who won the 2024 election?"
 ```
+
+`--clear-session` is a modifier (it combines with a question or with
+`--login`); it is allowed alongside `--dry-run`.
 
 ## AI Providers
 
@@ -551,6 +567,17 @@ ASKWEB_MAX_CMD_OUTPUT=20000 node index.js --cmd "git log"
 #   - Ensure the project directory is writable
 #   - Check that .chatgpt-conversations.json is not locked by another process
 ```
+
+## Testing
+
+Unit tests cover CLI parsing, provider registry/preferences, and the
+transmission/answer-detection helpers. No browser is launched:
+
+```bash
+npm test
+```
+
+See [`testing.md`](./testing.md) for the per-file breakdown.
 
 ## License
 

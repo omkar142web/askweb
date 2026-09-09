@@ -571,14 +571,14 @@ const OPTION_DEFINITIONS = [
     },
     {
         flags: ["--login"],
-        desc: "Open the ChatGPT login page and wait for you to sign in so the session cookie is saved.",
-        note: "Standalone action: ignores the question, files, --continue, and --new.",
+        desc: "Open the selected AI site and wait for you to sign in so the session is saved in the browser profile.",
+        note: "Standalone action: ignores the question, files, --continue, and --new. Acts on --provider <name> when given, otherwise the default from --ai.",
         example: "askweb --login",
     },
     {
         flags: ["--logout"],
-        desc: "Open ChatGPT and wait for you to log out manually; the session cookie is then cleared.",
-        note: "Standalone action (manual, up to 10 minutes).",
+        desc: "Open the selected AI site and wait for you to log out manually; the saved session is then cleared.",
+        note: "Standalone action (manual, up to 10 minutes). Acts on --provider <name> when given, otherwise the default from --ai.",
         example: "askweb --logout",
     },
     {
@@ -606,7 +606,7 @@ const OPTION_DEFINITIONS = [
         arg: "[name]",
         argOptional: true,
         desc: "Interactively create a new prompt preset. If <name> is omitted you are prompted for one.",
-        note: "Standalone action (interactive). <name> must match [-a-z0-9_]+ and must not start with '-'.",
+        note: "Standalone action (interactive). <name> must match [-a-z0-9_]+ and must not collide with a CLI flag (--continue, --login, ...).",
         example: "askweb --prompt-create fix",
     },
     {
@@ -663,7 +663,7 @@ const OPTION_DEFINITIONS = [
     },
     {
         flags: ["--clear-session"],
-        desc: "Wipe the browser profile's local/session storage before launching, so the AI website starts fresh (logged out) for this run.",
+        desc: "Wipe saved local/session storage and cookies before launching, so the AI website starts fresh (logged out) for this run.",
         note: "Modifier: combine with a question or with --login.",
         example: 'askweb --clear-session "What is today\'s date?"',
     },
@@ -693,15 +693,15 @@ const OPTION_DEFINITIONS = [
     },
     {
         flags: ["--dry-run"],
-        desc: "Print the exact prompt payload that would be sent to ChatGPT, then exit. No browser is launched and nothing is sent.",
-        note: "Cannot be combined with standalone actions: --login, --logout, --browser, --browser-order, --browser-reset, --prompts, --prompt-create, --ai, --ai-order, --ai-reset, --clear-conversations, or --clear-conversation.",
+        desc: "Print the exact prompt payload that would be sent to the selected AI provider, then exit. No browser is launched and nothing is sent.",
+        note: "Cannot be combined with standalone actions: --login, --logout, --browser, --browser-order, --browser-reset, --prompts, --prompt-create, --ai, --ai-order, --ai-reset, --clear-conversations, or --clear-conversation. May be combined with --print, -o/--output, --provider, --cmd, presets, and --continue/--new.",
         example: 'askweb --dry-run "Explain closures"',
     },
     {
         flags: ["--cmd"],
         arg: "<command>",
         argRequired: true,
-        desc: "Execute a local shell command and include its stdout/stderr output in the prompt sent to ChatGPT.",
+        desc: "Execute a local shell command and include its stdout/stderr output in the prompt sent to the AI.",
         note: "Can be repeated for multiple commands. Each command runs with a 30s timeout and is capped at ASKWEB_MAX_CMD_OUTPUT characters per stream (default 100 KB). Obvious destructive patterns are blocked.",
         example: 'askweb --cmd "git status" "Explain the current repository state."',
     },

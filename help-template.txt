@@ -56,9 +56,13 @@ COMMANDS
                     --dry-run cannot be combined with standalone actions:
                     --login, --logout, --browser, --browser-order,
                     --browser-reset, --prompts, --prompt-create, --ai,
-                    --ai-order, --ai-reset, or --clear-*.
+                    --ai-order, --ai-reset, --clear-conversations, or
+                    --clear-conversation. (--clear-session, --continue,
+                    --new, --provider, --cmd, presets, and output flags
+                    remain allowed.)
 
-  --provider <name>  Use a specific AI provider for this run only.
+  --provider <name>  Use a specific AI provider for this run only
+                    (see AI PROVIDERS for the full configuration).
                     Available providers: chatgpt, gemini.
                       askweb --provider gemini "Explain React"
                       askweb --provider=chatgpt "Explain React"
@@ -111,9 +115,11 @@ FILES
       total characters (~170 KB). Beyond that, log in (askweb --login) or
       trim the input. Gemini typically requires a login.
     - Anonymous Gemini bursts may be throttled even under the cap (accepted
-      sends that never generate). Parts are paced ~3s apart; if generation
-      never starts the finale is resent once after a 30s cooldown, then the
-      run fails fast with a rate-limit hint (wait and retry, or log in).
+      sends that never generate). Parts are sent back-to-back with only a
+      short settle gap; if generation never starts within ~45s the finale is
+      resent once after a 15s cooldown, then the run fails fast with a
+      rate-limit hint (wait a minute and retry, or log in). A long stall
+      with no progress also aborts after ~90s instead of hanging.
     - Set ASKWEB_CHUNK_SIZE=<chars> to override the automatic part size
       (applies to both providers; an explicit override skips the Gemini cap).
 
@@ -140,8 +146,8 @@ LOGIN & BROWSER
       --browser           Choose the default browser interactively.
       --browser-order     Reorder the fallback list interactively.
       --browser-reset     Reset to automatic selection (Chrome first).
-    --clear-session wipes local/session storage for the next launch, so the
-    browser starts logged out/anonymous:
+    --clear-session wipes saved local/session storage and cookies for the
+    next launch, so the browser starts logged out/anonymous:
       askweb --clear-session "Who won the 2024 election?"
 
 AI PROVIDERS
@@ -179,7 +185,8 @@ PROMPT PRESETS
 CONVERSATIONS
   Each run that returns an answer is saved locally to
   .chatgpt-conversations.json (in the install directory; up to 50 recent
-  conversations are kept). Every chat starts fresh by default.
+  conversations are kept). The filename is historical: entries from every
+  provider are stored there. Every chat starts fresh by default.
   Conversation ids are provider-agnostic, so --continue works across
   providers.
     --continue          Resume the most recent saved conversation.
@@ -236,6 +243,14 @@ VALID COMBINATIONS
     Run a preset, attach a file, and save the result.
   askweb --explain "JavaScript closures" -o out.md
     Run a preset that takes {{input}} and save the result.
+  askweb --cmd "git status" "Explain the current repository state."
+    Include local command output in the prompt.
+  askweb --dry-run "Review this" src/index.js
+    Preview the assembled prompt without launching a browser.
+  askweb --print "Explain closures"
+    Print the answer to stdout, write no answer file.
+  askweb --provider gemini "Explain React"
+    Ask a specific provider for one run.
   askweb --clear-session "Who won the 2024 election?"
     Start a clean (anonymous) chat with a question.
   askweb -- "-dash question"
@@ -262,6 +277,10 @@ INVALID USAGE
     -> Preset --explain takes an argument, e.g.: node index.js --explain "your input".
   askweb --continue=<id> "x"
     -> Unknown option: --continue=<id> (use a space: --continue <id> "x").
+  askweb --dry-run --login
+    -> --dry-run cannot be combined with standalone actions like --login.
+  askweb --provider unknown "hello"
+    -> Unknown provider: unknown (available providers: chatgpt, gemini).
   askweb --does-not-exist "hello"
     -> Unknown option: --does-not-exist.
 
@@ -276,16 +295,27 @@ EXAMPLES
     askweb -o answer.md "Explain promises"
   Append to a notes file
     askweb --append --output notes.md "Another explanation"
+  Print to stdout, no file
+    askweb --print "Explain closures"
+  Include shell command output
+    askweb --cmd "git status" "Explain the current repository state."
+  Preview the prompt without sending
+    askweb --dry-run "Review this" src/index.js
+  Ask a specific provider
+    askweb --provider gemini "Explain React"
   Continue the last conversation
     askweb --continue "Now explain it with an example"
   Continue a specific conversation
     askweb --continue <id> "More on this topic"
   Start fresh
     askweb --new "Let's discuss React"
-  Login (once, per user)
+  Login (once, per provider)
     askweb --login
+    askweb --login --provider gemini
   Browser configuration
     askweb --browser
+  AI provider configuration
+    askweb --ai
   Prompt manager
     askweb --prompts
   Create a preset
