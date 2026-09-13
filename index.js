@@ -163,6 +163,16 @@ function printPromptList(registry) {
     console.log("");
 }
 
+function printAllPrompts(registry) {
+    for (const [name, entry] of registry) {
+        const argTag = entry.arguments ? " (takes {{input}})" : "";
+        const customTag = entry.builtin ? "" : " [custom]";
+        console.log(`\n--- ${name}${argTag}${customTag} ---`);
+        if (entry.description) console.log(`Description: ${entry.description}`);
+        console.log(`${entry.prompt}\n`);
+    }
+}
+
 async function promptMultiline(label) {
     console.log(`${label} (finish with an empty line):`);
     const lines = [];
@@ -233,7 +243,7 @@ async function runPromptManager() {
     while (true) {
         const registry = loadPromptRegistry();
         printPromptList(registry);
-        const choice = (await promptUser("[a] Add  [e] Edit  [r] Rename  [d] Delete  [v] View  [q] Quit > ")).toLowerCase();
+        const choice = (await promptUser("[a] Add  [e] Edit  [r] Rename  [d] Delete  [v] View  [l] List all  [q] Quit > ")).toLowerCase();
 
         try {
             if (choice.startsWith("q")) break;
@@ -249,6 +259,11 @@ async function runPromptManager() {
                     const entry = loadPromptRegistry().get(name);
                     console.log(`\n--- ${name} ${entry.arguments ? "(takes {{input}})" : ""} ---\n${entry.prompt}\n`);
                 }
+                continue;
+            }
+
+            if (choice.startsWith("l")) {
+                printAllPrompts(loadPromptRegistry());
                 continue;
             }
 
@@ -597,7 +612,7 @@ const OPTION_DEFINITIONS = [
     },
     {
         flags: ["--prompts"],
-        desc: "Open the Prompt Manager to add, edit, rename, delete, or view presets.",
+        desc: "Open the Prompt Manager to add, edit, rename, delete, view, or list all presets.",
         note: "Standalone action (interactive).",
         example: "askweb --prompts",
     },
