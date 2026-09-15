@@ -3,40 +3,71 @@
 "use strict";
 
 const COMPOSER_SELECTORS = [
-    "#mobile-composer-prompt",
+    // Desktop logged-in/logged-out composer (verified live 2026-09-15):
+    // <div contenteditable="true" id="prompt-textarea" class="ProseMirror"
+    //  role="textbox" aria-label="Chat with ChatGPT"> (visible).
+    // NOTE: a hidden <textarea class="wcDTda_fallbackTextarea"
+    // name="prompt-textarea" placeholder="Temporary chat" style="display:none">
+    // also exists - visibility filtering skips it, so never match bare
+    // `textarea[aria-label=...]` first.
     "#prompt-textarea",
-    'textarea[aria-label="Chat with ChatGPT"]',
-    'textarea[placeholder="Ask ChatGPT"]',
+    'div.ProseMirror#prompt-textarea[contenteditable="true"]',
+    '[contenteditable="true"]#prompt-textarea',
+    'div.ProseMirror[contenteditable="true"]',
+    '[data-testid="prompt-textarea"]',
+    // Mobile / narrow-viewport composer variant.
+    "#mobile-composer-prompt",
+    "textarea[data-mobile-composer-prompt]",
+    // Generic fallbacks (last resort).
     '[contenteditable="true"][role="textbox"]',
+    '[contenteditable="plaintext-only"]',
+    "div[contenteditable=\"true\"]",
 ];
 
 const SEND_BUTTON_SELECTORS = [
     '[data-testid="send-button"]',
+    "#composer-submit-button",
+    'button[aria-label="Send prompt"]',
     'button[aria-label="Send message"]',
+    'button[aria-label*="Send" i]',
+    "form button[type=\"submit\"]",
 ];
 
 const STOP_BUTTON_SELECTORS = [
     '[data-testid="stop-button"]',
+    'button[aria-label*="Stop" i]',
+    'button[aria-label*="Cancel" i]',
     'button[aria-label="Stop streaming"]',
 ];
 
 const ATTACH_BUTTON_SELECTORS = [
-    '[data-testid="composer-plus-btn"]',
     'button[aria-label="Add files and more"]',
+    "button[data-composer-action]",
+    "button[data-octane-native-image-menu-trigger]",
+    '[data-testid="composer-plus-btn"]',
 ];
 
 const COPY_BUTTON_SELECTORS = [
-    '[data-testid="copy-turn-action-button"]',
     'button[aria-label="Copy response"]',
+    '[data-testid="copy-turn-action-button"]',
+    'button[aria-label*="Copy response" i]',
 ];
 
 const ASSISTANT_MESSAGE_SELECTORS = [
+    'li[data-message-role="assistant"]',
+    '[data-message-role="assistant"]',
     '[data-message-author-role="assistant"]',
+    '[data-turn="assistant"]',
+    'section[data-testid^="conversation-turn-"] [data-message-author-role="assistant"]',
     '[class*="_assistantMessage"]:not([class*="Actions"])',
 ];
 
 const USER_MESSAGE_SELECTORS = [
+    'li[data-message-role="user"]',
+    '[data-message-role="user"]',
     '[data-message-author-role="user"]',
+    '[data-turn="user"]',
+    '[data-testid="user-message"]',
     '[class*="_userMessageGroup"]',
     '[class*="_userMessage"]:not([class*="Actions"])',
 ];
@@ -47,7 +78,7 @@ const FILE_INPUT_SELECTOR = 'input[type="file"]';
 
 const UPLOAD_PROGRESS_SELECTORS = ["[role=progressbar]", ".animate-spin"];
 
-const MESSAGE_BOUNDARY_SELECTOR = "[data-message-author-role]";
+const MESSAGE_BOUNDARY_SELECTOR = "[data-message-role], [data-message-author-role], [data-turn]";
 
 const SELECTORS = {
     promptInput: COMPOSER_SELECTORS,
@@ -108,13 +139,31 @@ function elementText(el) {
 }
 
 function isUsableControl(el) {
+    // Generic enabled-control check. Must stay button-compatible: index.js
+    // reuses it for the stop-button signal in waitForSendAccepted.
     return (
         !!el &&
         !el.disabled &&
         !el.readOnly &&
-        el.getAttribute("aria-disabled") !== "true" &&
-        el.getAttribute("aria-hidden") !== "true"
+        (!el.getAttribute || el.getAttribute("aria-disabled") !== "true") &&
+        (!el.getAttribute || el.getAttribute("aria-hidden") !== "true")
     );
+}
+
+function isWritableControl(el) {
+    // Composer-specific: only elements that can actually receive text input
+    // (input, textarea, or contentEditable). Rejects <a>, <button>, <div>,
+    // etc. that happen to match a broad selector. Mirrors the Gemini path
+    // (providers/gemini/ui.js). The hidden fallback
+    // <textarea class="wcDTda_fallbackTextarea" style="display:none">
+    // passes this tag check but is still rejected by the visibility /
+    // offsetParent checks at the call sites.
+    if (!isUsableControl(el)) return false;
+    if (el.tagName) {
+        const tag = el.tagName.toLowerCase();
+        if (tag === "input" || tag === "textarea") return true;
+    }
+    return !!el.isContentEditable;
 }
 
 const PAGE_DOM_SOURCE = {
@@ -122,6 +171,7 @@ const PAGE_DOM_SOURCE = {
     domIsVisible: `(${domIsVisible.toString()})`,
     elementText: `(${elementText.toString()})`,
     isUsableControl: `(${isUsableControl.toString()})`,
+    isWritableControl: `(function(){const isUsableControl=${isUsableControl.toString()};return ${isWritableControl.toString()}})()`,
 };
 
 const CHATGPT_DOM = {
@@ -135,7 +185,7 @@ const CHATGPT_DOM = {
         selector: selector("promptInput"),
         finderSource: PAGE_DOM_SOURCE.firstVisibleElement,
         textSource: PAGE_DOM_SOURCE.elementText,
-        usableSource: PAGE_DOM_SOURCE.isUsableControl,
+        usableSource: PAGE_DOM_SOURCE.isWritableControl,
     }),
 };
 
@@ -484,6 +534,7 @@ async function waitForEnabled(page, input) {
     await page.waitForFunction(
         ({ selector, finderSource, usableSource }) => {
             const el = eval(finderSource)(selector);
+            if (!el) return false;
             return eval(usableSource)(el) && el.offsetParent !== null;
         },
         CHATGPT_DOM.promptPayload(),
@@ -536,6 +587,7 @@ module.exports = {
     firstVisibleElement,
     elementText,
     isUsableControl,
+    isWritableControl,
     POPUP_DISMISS_PATTERNS,
     UPLOAD_OVERLAY_TEXT,
     COMPOSER_SELECTORS,

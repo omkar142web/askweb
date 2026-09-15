@@ -4,7 +4,7 @@ const ui = require("../chatgpt-ui");
 const { chromium } = require("playwright");
 
 const COMP =
-    '<textarea id="composer" aria-label="Chat with ChatGPT" placeholder="Ask ChatGPT" style="width:400px;height:60px"></textarea>';
+    '<div id="prompt-textarea" class="ProseMirror" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Chat with ChatGPT" style="width:400px;min-height:60px"><p><br></p></div>';
 
 function modal(attrs, inner) {
     return `<div ${attrs} role="dialog" aria-modal="true" style="position:fixed;inset:5%;background:#fff;border:1px solid #333">${inner}</div>`;
