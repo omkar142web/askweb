@@ -1219,46 +1219,8 @@ function cleanupTempPayloads() {
 const chipError = (name) => new Error(`attachment chip for "${name}" never appeared`);
 
 async function focusComposer(input) {
-    try {
-        await input.click({ timeout: 10000, force: true });
-    } catch {
-        // Visibility is verified via the paste check below; a covered or
-        // animating composer should not abort the whole send.
-    }
-    await input.focus().catch(() => {});
-}
-
-async function clearComposerInput(page, input) {
-    // input.fill("") hangs on contenteditable ProseMirror composers
-    // (ChatGPT's #prompt-textarea div), so clear with select-all + delete,
-    // which works for both contenteditable divs and plain textareas
-    // (e.g. the #mobile-composer-prompt variant). Mirrors the Gemini path.
-    const cleared = await promptInput(page)
-        .evaluate((el) => {
-            const text = "value" in el ? el.value || "" : el.innerText || el.textContent || "";
-            if (!text) return true;
-            if ("value" in el) el.value = "";
-            else el.innerHTML = "";
-            el.dispatchEvent(new InputEvent("input", { bubbles: true }));
-            return true;
-        })
-        .catch(() => false);
-    if (cleared && (await composerEmpty(page).catch(() => true))) return;
-    try {
-        await input.press(process.platform === "darwin" ? "Meta+a" : "Control+a");
-        await page.waitForTimeout(30);
-        await input.press("Backspace");
-        await page.waitForTimeout(50);
-    } catch { /* fall through to the evaluate fallback below */ }
-    if (!(await composerEmpty(page).catch(() => true))) {
-        await promptInput(page)
-            .evaluate((el) => {
-                if ("value" in el) el.value = "";
-                else el.innerHTML = "";
-                el.dispatchEvent(new InputEvent("input", { bubbles: true }));
-            })
-            .catch(() => {});
-    }
+    await input.click();
+    await input.focus();
 }
 
 async function trySend(page, sendButton, { requireVisible = false, force = false } = {}) {
@@ -1809,7 +1771,7 @@ async function typePrompt(page, input, text) {
     await dismissBlockingUI(page);
 
     await focusComposer(input);
-    await clearComposerInput(page, input);
+    await input.fill("");
 
     if (text) {
         await pasteIntoComposer(page, input, text);
@@ -1967,7 +1929,7 @@ async function looksLikeUsageLimit(page) {
     return page
         .evaluate(() => {
             const clone = document.body.cloneNode(true);
-            clone.querySelectorAll("[data-message-role], [data-message-author-role], [data-turn]").forEach((node) => node.remove());
+            clone.querySelectorAll("[data-message-role], [data-message-author-role]").forEach((node) => node.remove());
             const text = clone.textContent || "";
             return (
                 /\busage\s+(limit|cap)\b/i.test(text) ||
@@ -2334,24 +2296,15 @@ async function sendQuestion(page, question, targetUrl = URL, context = null) {
 
 async function findCopyButton(page, answer) {
     const parent = answer.locator("xpath=..");
-    // The turn toolbar (Copy response / Share) lives near the assistant
-    // <li data-message-role="assistant">, which may be several levels above
-    // the answer element. Search answer-local scopes first so a page-wide
-    // search never grabs a stale turn's button or a code-block copy button.
-    const turnAncestor = answer.locator("xpath=ancestor::li").first();
     const tiers = [
         selector("copyButton"),
         'button[aria-label*="copy" i]:not([aria-label*="code" i]):not([aria-label*="image" i]):not([aria-label*="prompt" i]):not([aria-label*="message" i])',
     ];
-    for (const sel of tiers) {
-        for (const scope of [answer, parent, turnAncestor, page]) {
-            // Use .first() rather than .last() so that when multiple copy
-            // buttons match (e.g. code-block buttons alongside the
-            // response-level button), the response-level one wins. The
-            // generic tier excludes code/image/prompt/message buttons.
-            const button = scope.locator(sel).first();
+    for (const selector of tiers) {
+        for (const scope of [answer, parent, page]) {
+            const button = scope.locator(selector).first();
             if ((await button.count()) > 0 && (await button.isVisible().catch(() => false))) {
-                console.log(`>> Copy button found (scope: ${scope === answer ? "answer" : scope === parent ? "parent" : scope === turnAncestor ? "turn-ancestor" : "page"}).`);
+                console.log(`>> Copy button found (scope: ${scope === answer ? "answer" : scope === parent ? "parent" : "page"}).`);
                 return button;
             }
         }
